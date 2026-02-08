@@ -37,6 +37,8 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     # Third party
     'rest_framework',
+    'rest_framework_simplejwt',
+    'django_filters',
     'corsheaders',
     # Local apps
     'api',
@@ -74,11 +76,15 @@ TEMPLATES = [
 # Required for Vercel - expose WSGI app variable
 WSGI_APPLICATION = 'equilo.wsgi.app'
 
-# Database - Vercel serverless doesn't support traditional DB connections
-# Use external DB (Neon, Supabase, Railway) and set DATABASE_URL
-# For local dev, SQLite works; for Vercel add dj-database-url and DATABASE_URL env
+# Database - Supabase (PostgreSQL) when DATABASE_URL is set, else SQLite for local dev
 DATABASES = {}
-if not os.environ.get('VERCEL'):
+if os.environ.get('DATABASE_URL'):
+    import dj_database_url
+    DATABASES['default'] = dj_database_url.config(
+        conn_max_age=600,
+        conn_health_checks=True,
+    )
+elif not os.environ.get('VERCEL'):
     DATABASES['default'] = {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
@@ -107,15 +113,28 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # REST Framework
 REST_FRAMEWORK = {
-    'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.AllowAny',
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
     ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+    'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend'],
 }
 
-# CORS - allow React frontend (update with your frontend URLs in production)
+# JWT (Simple JWT)
+from datetime import timedelta
+SIMPLE_JWT = {
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+}
+
+# CORS - allow React frontend
 CORS_ALLOWED_ORIGINS = [
     'http://localhost:3000',
     'http://127.0.0.1:3000',
 ]
-# For Vercel preview deployments
-CORS_ALLOW_ALL_ORIGINS = DEBUG  # Set to False and configure CORS_ALLOWED_ORIGINS in prod
+if os.environ.get('CORS_ORIGINS'):
+    CORS_ALLOWED_ORIGINS.extend(origin.strip() for origin in os.environ['CORS_ORIGINS'].split(','))
+CORS_ALLOW_ALL_ORIGINS = DEBUG
