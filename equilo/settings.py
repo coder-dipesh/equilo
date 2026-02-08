@@ -84,7 +84,19 @@ if os.environ.get('DATABASE_URL'):
         conn_max_age=600,
         conn_health_checks=True,
     )
-elif not os.environ.get('VERCEL'):
+    if not DATABASES['default'].get('ENGINE'):
+        raise ValueError(
+            'DATABASE_URL is set but could not be parsed. '
+            'Use a valid PostgreSQL URL (e.g. from Supabase: Connection string URI).'
+        )
+else:
+    if os.environ.get('VERCEL'):
+        from django.core.exceptions import ImproperlyConfigured
+        raise ImproperlyConfigured(
+            'On Vercel, DATABASE_URL must be set. '
+            'Add it in Vercel Project Settings → Environment Variables '
+            '(e.g. Supabase → Settings → Database → Connection string URI).'
+        )
     DATABASES['default'] = {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',

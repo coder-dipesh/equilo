@@ -112,11 +112,22 @@ class ExpenseCategoryViewSet(ModelViewSet):
     serializer_class = ExpenseCategorySerializer
     permission_classes = [IsAuthenticated]
 
+    PRESET_CATEGORIES = ['Rent', 'Utilities', 'Groceries', 'Internet', 'Other']
+
     def get_queryset(self):
         place_id = self.kwargs.get('place_id')
         if not place_id or not PlaceMember.objects.filter(place_id=place_id, user=self.request.user).exists():
             return ExpenseCategory.objects.none()
-        return ExpenseCategory.objects.filter(place_id=place_id)
+        qs = ExpenseCategory.objects.filter(place_id=place_id)
+        # Ensure all preset categories exist (fixes new places and places that only got one category)
+        try:
+            place = Place.objects.get(id=place_id)
+            for name in self.PRESET_CATEGORIES:
+                ExpenseCategory.objects.get_or_create(place=place, name=name)
+            qs = ExpenseCategory.objects.filter(place_id=place_id).order_by('name')
+        except Place.DoesNotExist:
+            pass
+        return qs
 
     def perform_create(self, serializer):
         place = Place.objects.get(id=self.kwargs['place_id'])
@@ -134,8 +145,30 @@ class ExpenseViewSet(ModelViewSet):
         if not place_id or not PlaceMember.objects.filter(place_id=place_id, user=self.request.user).exists():
             return Expense.objects.none()
         return Expense.objects.filter(place_id=place_id).select_related(
-            'paid_by', 'category', 'place'
+            'paid_by', 'added_by', 'category', 'place'
         ).prefetch_related('splits__user')
+
+    def _can_edit_expense(self, request, expense):
+        if not expense.place.members.filter(user=request.user).exists():
+            return False
+        if expense.place.members.filter(user=request.user, role=PlaceMember.ROLE_OWNER).exists():
+            return True
+        if expense.added_by_id == request.user.id:
+            return True
+        return False
+
+    def perform_destroy(self, instance):
+        if not self._can_edit_expense(self.request, instance):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Only the person who added this expense or the place owner can delete it.')
+        super().perform_destroy(instance)
+
+    def perform_update(self, serializer):
+        instance = serializer.instance
+        if not self._can_edit_expense(self.request, instance):
+            from rest_framework.exceptions import PermissionDenied
+            raise PermissionDenied('Only the person who added this expense or the place owner can edit it.')
+        super().perform_update(serializer)
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -164,20 +197,40 @@ class PlaceInviteViewSet(ModelViewSet):
             return PlaceInvite.objects.none()
         if not PlaceMember.objects.filter(place_id=place_id, user=self.request.user).exists():
             return PlaceInvite.objects.none()
-        return PlaceInvite.objects.filter(place_id=place_id)
+        # Only show email invites in the list; link-only invites are not shown as "pending"
+        return PlaceInvite.objects.filter(
+            place_id=place_id,
+            status=PlaceInvite.STATUS_PENDING,
+        ).exclude(email__isnull=True)
 
     def perform_create(self, serializer):
         place = Place.objects.get(id=self.kwargs['place_id'])
         if not place.members.filter(user=self.request.user, role=PlaceMember.ROLE_OWNER).exists():
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('Only the place owner can send invites.')
+        email = serializer.validated_data.get('email') or None
+        if email:
+            email = email.strip() or None
+        # When creating a link-only invite, expire previous link-only invites so only one is active
+        if not email:
+            PlaceInvite.objects.filter(
+                place=place,
+                email__isnull=True,
+                status=PlaceInvite.STATUS_PENDING,
+            ).update(status=PlaceInvite.STATUS_EXPIRED)
         invite = serializer.save(
             place=place,
             invited_by=self.request.user,
             token=secrets.token_urlsafe(32),
             status=PlaceInvite.STATUS_PENDING,
+            email=email,
         )
         # TODO: send email with link containing invite.token
+
+
+def _invite_expired(invite):
+    """Invite links expire after 1 day."""
+    return timezone.now() - invite.created_at > timedelta(days=1)
 
 
 @api_view(['POST'])
@@ -188,6 +241,12 @@ def join_place(request, token):
         invite = PlaceInvite.objects.get(token=token, status=PlaceInvite.STATUS_PENDING)
     except PlaceInvite.DoesNotExist:
         return Response({'error': 'Invalid or expired invite'}, status=status.HTTP_404_NOT_FOUND)
+    if _invite_expired(invite):
+        invite.status = PlaceInvite.STATUS_EXPIRED
+        invite.save(update_fields=['status'])
+        return Response({
+            'error': 'This invite link has expired. Please ask the place owner for a new link.',
+        }, status=status.HTTP_410_GONE)
     if invite.email and request.user.email and invite.email.lower() != request.user.email.lower():
         return Response({'error': 'This invite was sent to another email'}, status=status.HTTP_400_BAD_REQUEST)
     PlaceMember.objects.get_or_create(place=invite.place, user=request.user, defaults={'role': PlaceMember.ROLE_MEMBER})
@@ -197,13 +256,19 @@ def join_place(request, token):
 
 
 @api_view(['GET'])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])
 def invite_by_token(request, token):
-    """Get invite details by token (to show place name before joining)."""
+    """Get invite details by token (to show place name before joining). Public so join page can show place name."""
     try:
         invite = PlaceInvite.objects.get(token=token, status=PlaceInvite.STATUS_PENDING)
     except PlaceInvite.DoesNotExist:
         return Response({'error': 'Invalid or expired invite'}, status=status.HTTP_404_NOT_FOUND)
+    if _invite_expired(invite):
+        invite.status = PlaceInvite.STATUS_EXPIRED
+        invite.save(update_fields=['status'])
+        return Response({
+            'error': 'This invite link has expired. Please ask the place owner for a new link.',
+        }, status=status.HTTP_410_GONE)
     return Response({
         'place_name': invite.place.name,
         'email': invite.email,

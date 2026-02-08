@@ -45,6 +45,17 @@ class ExpenseCategorySerializer(serializers.ModelSerializer):
         model = ExpenseCategory
         fields = ['id', 'name']
 
+    def create(self, validated_data):
+        # place is passed from view perform_create via save(place=place)
+        place = validated_data.pop('place', None)
+        if not place:
+            raise serializers.ValidationError('Place is required')
+        name = (validated_data.get('name') or '').strip()
+        if not name:
+            raise serializers.ValidationError({'name': 'Category name is required.'})
+        category, _ = ExpenseCategory.objects.get_or_create(place=place, name=name, defaults={'name': name})
+        return category
+
 
 class ExpenseSplitSerializer(serializers.ModelSerializer):
     user = UserSerializer(read_only=True)
@@ -56,6 +67,7 @@ class ExpenseSplitSerializer(serializers.ModelSerializer):
 
 class ExpenseSerializer(serializers.ModelSerializer):
     paid_by = UserSerializer(read_only=True)
+    added_by = UserSerializer(read_only=True)
     category = ExpenseCategorySerializer(read_only=True)
     splits = ExpenseSplitSerializer(many=True, read_only=True)
     split_user_ids = serializers.ListField(
@@ -68,10 +80,10 @@ class ExpenseSerializer(serializers.ModelSerializer):
         model = Expense
         fields = [
             'id', 'place', 'amount', 'description', 'date',
-            'paid_by', 'category', 'created_at',
+            'paid_by', 'added_by', 'category', 'created_at',
             'splits', 'split_user_ids'
         ]
-        read_only_fields = ['created_at', 'place']
+        read_only_fields = ['created_at', 'place', 'added_by']
 
     def create(self, validated_data):
         split_user_ids = validated_data.pop('split_user_ids', [])
@@ -86,6 +98,7 @@ class ExpenseSerializer(serializers.ModelSerializer):
         elif isinstance(paid_by, int):
             paid_by = User.objects.get(pk=paid_by)
         validated_data['paid_by'] = paid_by
+        validated_data['added_by'] = user
         expense = Expense.objects.create(**validated_data)
         for uid in split_user_ids:
             if place.members.filter(user_id=uid).exists():
@@ -112,6 +125,7 @@ class ExpenseSerializer(serializers.ModelSerializer):
 
 class PlaceInviteSerializer(serializers.ModelSerializer):
     invited_by = UserSerializer(read_only=True)
+    email = serializers.EmailField(required=False, allow_blank=True)
 
     class Meta:
         model = PlaceInvite

@@ -24,11 +24,11 @@ export default function Register() {
   }
 
   return (
-    <div className="auth-page">
-      <h1>Equilo</h1>
-      <p className="tagline">Split bills with your place</p>
-      <form onSubmit={handleSubmit} className="auth-form">
-        {error && <div className="error">{error}</div>}
+    <div className="max-w-[360px] mx-auto my-8 text-center">
+      <h1 className="text-h1 m-0 mb-1">Equilo</h1>
+      <p className="text-body text-text-secondary mb-6">Split bills with your place</p>
+      <form onSubmit={handleSubmit} className="flex flex-col gap-3 text-left">
+        {error && <div className="alert alert-error text-sm">{error}</div>}
         <input
           type="text"
           placeholder="Username"
@@ -36,6 +36,7 @@ export default function Register() {
           onChange={(e) => setUsername(e.target.value)}
           required
           autoComplete="username"
+          className="input input-bordered w-full"
         />
         <input
           type="email"
@@ -43,6 +44,7 @@ export default function Register() {
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           autoComplete="email"
+          className="input input-bordered w-full"
         />
         <input
           type="password"
@@ -51,11 +53,14 @@ export default function Register() {
           onChange={(e) => setPassword(e.target.value)}
           required
           autoComplete="new-password"
+          className="input input-bordered w-full"
         />
-        <button type="submit">Sign up</button>
+        <button type="submit" className="btn btn-primary mt-2">
+          Sign up
+        </button>
       </form>
-      <p className="auth-footer">
-        Already have an account? <Link to="/login">Log in</Link>
+      <p className="mt-6 text-sm">
+        Already have an account? <Link to={next && next !== '/' ? `/login?next=${encodeURIComponent(next)}` : '/login'} className="link link-primary">Log in</Link>
       </p>
     </div>
   );

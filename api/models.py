@@ -52,7 +52,7 @@ class PlaceInvite(models.Model):
     STATUS_EXPIRED = 'expired'
 
     place = models.ForeignKey(Place, on_delete=models.CASCADE, related_name='invites')
-    email = models.EmailField()
+    email = models.EmailField(blank=True, null=True)  # null = link-only invite
     token = models.CharField(max_length=64, unique=True)
     invited_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -67,7 +67,6 @@ class PlaceInvite(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        unique_together = ['place', 'email']
         ordering = ['-created_at']
 
 
@@ -95,6 +94,13 @@ class Expense(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name='expenses_paid'
+    )
+    added_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='expenses_added',
+        null=True,
+        blank=True,
     )
     category = models.ForeignKey(
         ExpenseCategory,

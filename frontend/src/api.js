@@ -69,7 +69,7 @@ export const expenses = (placeId) => ({
 
 export const invites = (placeId) => ({
   list: () => api(`/places/${placeId}/invites/`),
-  create: (email) => api(`/places/${placeId}/invites/`, { method: 'POST', body: JSON.stringify({ email }) }),
+  create: (email = '') => api(`/places/${placeId}/invites/`, { method: 'POST', body: JSON.stringify({ email: email || '' }) }),
   delete: (id) => api(`/places/${placeId}/invites/${id}/`, { method: 'DELETE' }),
 });
 
