@@ -1,0 +1,9 @@
+# Django
+Django>=5.0,<6.0
+
+# REST API
+djangorestframework>=3.14.0
+django-cors-headers>=4.3.0
+
+# Production
+gunicorn>=21.0.0
