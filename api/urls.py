@@ -10,6 +10,7 @@ router.register(r'places', views.PlaceViewSet, basename='place')
 urlpatterns = [
     path('hello/', views.hello_world),
     path('auth/me/', views.me),
+    path('auth/password/change/', views.change_password),
     path('auth/register/', views.register),
     path('auth/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),

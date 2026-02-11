@@ -77,18 +77,19 @@ TEMPLATES = [
 WSGI_APPLICATION = 'equilo.wsgi.app'
 
 # Database - Supabase (PostgreSQL) when DATABASE_URL is set, else SQLite for local dev
-DATABASES = {}
-if os.environ.get('DATABASE_URL'):
+# Always set ENGINE explicitly so we never fall back to Django's dummy backend.
+DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
+if DATABASE_URL:
     import dj_database_url
-    DATABASES['default'] = dj_database_url.config(
+    _db = dj_database_url.config(
+        default=DATABASE_URL,
         conn_max_age=600,
         conn_health_checks=True,
     )
-    if not DATABASES['default'].get('ENGINE'):
-        raise ValueError(
-            'DATABASE_URL is set but could not be parsed. '
-            'Use a valid PostgreSQL URL (e.g. from Supabase: Connection string URI).'
-        )
+    # Ensure ENGINE is always set (required; some envs may not set it)
+    if not _db.get('ENGINE'):
+        _db['ENGINE'] = 'django.db.backends.postgresql'
+    DATABASES = {'default': _db}
 else:
     if os.environ.get('VERCEL'):
         from django.core.exceptions import ImproperlyConfigured
@@ -97,10 +98,20 @@ else:
             'Add it in Vercel Project Settings → Environment Variables '
             '(e.g. Supabase → Settings → Database → Connection string URI).'
         )
-    DATABASES['default'] = {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
     }
+
+# Fail fast if default DB is missing ENGINE (should never happen with the logic above)
+if 'default' not in DATABASES or not DATABASES['default'].get('ENGINE'):
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured(
+        'settings.DATABASES["default"] must have an ENGINE. '
+        'Set DATABASE_URL (e.g. Supabase PostgreSQL URI) in your environment.'
+    )
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
@@ -119,6 +130,10 @@ USE_TZ = True
 # Static files
 STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+# Media files (user uploads, e.g. profile photos)
+MEDIA_URL = 'media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

@@ -1,109 +1,134 @@
 @import "tailwindcss";
 @plugin "daisyui";
 
-/*
-  Equilo design system (Tailwind v4)
-  - Colors: bg-bg, bg-surface, border-border, text-text-primary, text-text-secondary, text-text-muted,
-    bg-accent, accent-hover; success, warning, danger; owed, owe (summary).
-  - Type: .text-h1, .text-h2, .text-h3, .text-body-lg, .text-body, .text-small, .text-label
-  - Radius: rounded-md (10px), rounded-lg (16px). Shadow: shadow-soft. Spacing: spacing-18 (72px).
-  - Font: Inter (400, 500, 600) via body / font-sans.
-  - DaisyUI light/dark themes are overridden to use this palette (primary = accent teal).
-*/
-/* ========== Equilo design system (@theme) ========== */
-@theme {
-  /* Font */
-  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+/* Custom light theme: silk – fintech blue (used when user selects light mode) */
 
-  /* Core surfaces & borders */
-  --color-bg: #f8fafc;
-  --color-surface: #ffffff;
-  --color-border: #e5e7eb;
+@plugin "daisyui/theme" {
+  name: "silk";
+  default: false;
+  prefersdark: false;
+  color-scheme: "light";
+  /* Surfaces aligned with design system */
+  --color-base-100: #FFFFFF;
+  --color-base-200: #F5F7FA;
+  --color-base-300: #DDE3EA;
+  --color-base-content: #0B0F1A;
+  /* Primary = brand blue (fintech CTA) */
+  --color-primary: #1F5BFF;
+  --color-primary-content: #FFFFFF;
+  --color-secondary: #4D7CFF;
+  --color-secondary-content: #FFFFFF;
+  --color-accent: #00A8E8;
+  --color-accent-content: #FFFFFF;
+  --color-neutral: #4B5563;
+  --color-neutral-content: #FFFFFF;
+  --color-info: #4D7CFF;
+  --color-info-content: #FFFFFF;
+  --color-success: #16A34A;
+  --color-success-content: #FFFFFF;
+  --color-warning: #F59E0B;
+  --color-warning-content: #0B0F1A;
+  --color-error: #DC2626;
+  --color-error-content: #FFFFFF;
+  --radius-selector: 1.25rem;
+  --radius-field: 0.5rem;
+  --radius-box: 1rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1.5px;
+  --depth: 1;
+  --noise: 1;
+}
+
+
+/*
+  Equilo design system (Tailwind v4) – fintech theme
+  - Surfaces: bg, surface, border. Text: text-primary, text-secondary, text-muted, text-disabled.
+  - Brand: brand-50…brand-900. Accent: accent-500, accent-600. Status: success, warning, danger.
+  - Type: .text-h1, .text-h2, .text-h3, .text-body, .text-small, .text-label
+  - Light mode uses DaisyUI theme "silk" (data-theme="silk").
+*/
+@theme {
+  /* Font – Inter (fintech-style) */
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  /* Surfaces */
+  --color-bg: #F5F7FA;
+  --color-surface: #FFFFFF;
+  --color-border: #DDE3EA;
 
   /* Text */
-  --color-text-primary: #0f172a;
-  --color-text-secondary: #64748b;
-  --color-text-muted: #94a3b8;
-  --color-text-disabled: #cbd5e1;
+  --color-text-primary: #0B0F1A;
+  --color-text-secondary: #4B5563;
+  --color-text-muted: #6B7280;
+  --color-text-disabled: #9CA3AF;
 
-  /* Brand accent */
-  --color-accent: #2dd4bf;
-  --color-accent-hover: #22c1ad;
+  /* Brand (fintech blue – primary CTA) */
+  --color-brand-50: #EAF2FF;
+  --color-brand-100: #D6E6FF;
+  --color-brand-200: #AFCBFF;
+  --color-brand-300: #7FA8FF;
+  --color-brand-400: #4D7CFF;
+  --color-brand-500: #1F5BFF;
+  --color-brand-600: #1747D6;
+  --color-brand-700: #1237A8;
+  --color-brand-800: #0E2B82;
+  --color-brand-900: #0B2166;
 
-  /* Status (DaisyUI uses error/success/warning; we keep these for utilities) */
-  --color-success: #22c55e;
-  --color-warning: #f59e0b;
-  --color-danger: #ef4444;
+  /* Accent (light blue highlight) */
+  --color-accent-500: #00A8E8;
+  --color-accent-600: #0092C9;
 
-  /* Summary semantic (place detail) */
-  --color-owed: #22c55e;
-  --color-owe: #f59e0b;
+  /* Status */
+  --color-success: #16A34A;
+  --color-warning: #F59E0B;
+  --color-danger: #DC2626;
+  --color-owed: #16A34A;
+  --color-owe: #F59E0B;
 
   /* Border radius */
   --radius-md: 10px;
   --radius-lg: 16px;
+  --radius-xl: 20px;
 
   /* Shadow */
   --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.04);
-
-  /* Spacing */
+  --shadow-card: 0 2px 10px rgba(11, 15, 26, 0.06);
+  --shadow-focus: 0 0 0 4px rgba(31, 91, 255, 0.18);
   --spacing-18: 4.5rem;
 }
 
-/* Override DaisyUI light theme to use Equilo design system */
-[data-theme="light"] {
-  color-scheme: light;
-  --color-base-100: #f8fafc;
-  --color-base-200: #ffffff;
-  --color-base-300: #e5e7eb;
-  --color-base-content: #0f172a;
-  --color-primary: #2dd4bf;
-  --color-primary-content: #0f172a;
-  --color-secondary: #64748b;
-  --color-secondary-content: #f8fafc;
-  --color-accent: #2dd4bf;
-  --color-accent-content: #0f172a;
-  --color-neutral: #0f172a;
-  --color-neutral-content: #f8fafc;
-  --color-info: #64748b;
-  --color-info-content: #f8fafc;
-  --color-success: #22c55e;
-  --color-success-content: #0f172a;
-  --color-warning: #f59e0b;
-  --color-warning-content: #0f172a;
-  --color-error: #ef4444;
-  --color-error-content: #ffffff;
-  --radius-selector: 10px;
-  --radius-field: 10px;
-  --radius-box: 16px;
-}
-
-/* Dark theme: Equilo-inspired dark variant */
+/* Dark theme: dark backgrounds, light text */
 [data-theme="dark"] {
   color-scheme: dark;
-  --color-base-100: #0f172a;
-  --color-base-200: #1e293b;
-  --color-base-300: #334155;
-  --color-base-content: #f1f5f9;
-  --color-primary: #2dd4bf;
-  --color-primary-content: #0f172a;
-  --color-secondary: #94a3b8;
-  --color-secondary-content: #0f172a;
-  --color-accent: #2dd4bf;
-  --color-accent-content: #0f172a;
-  --color-neutral: #e2e8f0;
-  --color-neutral-content: #0f172a;
-  --color-info: #94a3b8;
-  --color-info-content: #0f172a;
-  --color-success: #22c55e;
-  --color-success-content: #0f172a;
-  --color-warning: #f59e0b;
-  --color-warning-content: #0f172a;
-  --color-error: #ef4444;
-  --color-error-content: #ffffff;
-  --radius-selector: 10px;
-  --radius-field: 10px;
-  --radius-box: 16px;
+  --color-base-100: oklch(18% 0.01 265);
+  --color-base-200: oklch(22% 0.012 265);
+  --color-base-300: oklch(28% 0.012 265);
+  --color-base-content: oklch(92% 0.01 265);
+  --color-primary: oklch(70% 0.15 265);
+  --color-primary-content: oklch(20% 0.02 265);
+  --color-secondary: oklch(65% 0.02 265);
+  --color-secondary-content: oklch(95% 0.01 265);
+  --color-accent: oklch(70% 0.15 265);
+  --color-accent-content: oklch(20% 0.02 265);
+  --color-neutral: oklch(30% 0.01 265);
+  --color-neutral-content: oklch(90% 0.01 265);
+  --color-info: oklch(65% 0.1 250);
+  --color-info-content: oklch(98% 0.01 250);
+  --color-success: oklch(70% 0.15 145);
+  --color-success-content: oklch(25% 0.05 145);
+  --color-warning: oklch(75% 0.12 85);
+  --color-warning-content: oklch(25% 0.05 85);
+  --color-error: oklch(65% 0.2 25);
+  --color-error-content: oklch(98% 0.01 25);
+  /* Design system tokens so .bg-bg and .text-text-primary follow dark theme */
+  --color-bg: oklch(18% 0.01 265);
+  --color-surface: oklch(22% 0.012 265);
+  --color-border: oklch(35% 0.015 265);
+  --color-text-primary: oklch(92% 0.01 265);
+  --color-text-secondary: oklch(75% 0.02 265);
+  --color-text-muted: oklch(60% 0.02 265);
+  --color-text-disabled: oklch(45% 0.02 265);
 }
 
 @layer base {
@@ -134,22 +159,34 @@
   }
 }
 
-/* Equilo type scale (design system) */
+/* Ensure theme colors and shadow are available as utilities (Tailwind v4 + DaisyUI) */
+@layer utilities {
+  .text-text-primary { color: var(--color-text-primary, var(--color-base-content)); }
+  .text-text-secondary { color: var(--color-text-secondary, #4B5563); }
+  .text-text-muted { color: var(--color-text-muted, #6B7280); }
+  .bg-bg { background-color: var(--color-bg, var(--color-base-100)); }
+  .bg-surface { background-color: var(--color-surface, #FFFFFF); }
+  .shadow-soft { box-shadow: var(--shadow-soft, 0 1px 2px rgba(0, 0, 0, 0.04)); }
+  .shadow-card { box-shadow: var(--shadow-card, 0 2px 10px rgba(11, 15, 26, 0.06)); }
+  .shadow-focus { box-shadow: var(--shadow-focus, 0 0 0 4px rgba(31, 91, 255, 0.18)); }
+}
+
+/* Equilo type scale (fintech design system) */
 @layer components {
   .text-h1 {
-    font-size: 48px;
-    line-height: 56px;
-    font-weight: 600;
+    font-size: 44px;
+    line-height: 52px;
+    font-weight: 700;
   }
   .text-h2 {
-    font-size: 32px;
-    line-height: 40px;
-    font-weight: 600;
+    font-size: 30px;
+    line-height: 38px;
+    font-weight: 700;
   }
   .text-h3 {
-    font-size: 24px;
-    line-height: 32px;
-    font-weight: 500;
+    font-size: 22px;
+    line-height: 30px;
+    font-weight: 600;
   }
   .text-body-lg {
     font-size: 18px;
@@ -169,7 +206,7 @@
   .text-label {
     font-size: 12px;
     line-height: 16px;
-    font-weight: 500;
+    font-weight: 600;
   }
 }
 
@@ -196,4 +233,22 @@
 
 .animate-fade-in {
   animation: fade-in 0.3s ease-out forwards;
+}
+
+/* Remove Recharts focus outline and any blue border/box when chart is focused */
+.recharts-responsive-container,
+.recharts-wrapper,
+.recharts-surface {
+  outline: none !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+.recharts-responsive-container:focus,
+.recharts-wrapper:focus,
+.recharts-surface:focus,
+.recharts-responsive-container:focus-visible,
+.recharts-wrapper:focus-visible {
+  outline: none !important;
+  border: none !important;
+  box-shadow: none !important;
 }

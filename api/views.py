@@ -9,10 +9,13 @@ from rest_framework import status, generics
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.viewsets import ModelViewSet
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .models import Place, PlaceMember, ExpenseCategory, Expense, ExpenseSplit, PlaceInvite
+from .models import Place, PlaceMember, ExpenseCategory, Expense, ExpenseSplit, PlaceInvite, UserProfile
+
+User = get_user_model()
 from .permissions import IsPlaceMember
 from .serializers import (
     UserSerializer,
@@ -28,11 +31,47 @@ User = get_user_model()
 
 # ----- Auth (public) -----
 
-@api_view(['GET'])
+@api_view(['GET', 'PATCH'])
 @permission_classes([IsAuthenticated])
 def me(request):
-    """Current user info (after JWT login)."""
-    return Response(UserSerializer(request.user).data)
+    """Current user info (GET) or update profile (PATCH: email, display_name, profile_photo). Username is read-only."""
+    if request.method == 'PATCH':
+        user = request.user
+        data = request.data
+        # Username is not changeable via this endpoint
+        if 'email' in data:
+            user.email = (data['email'] or '').strip()
+        user.save()
+        profile, _ = UserProfile.objects.get_or_create(user=user, defaults={'display_name': ''})
+        if 'display_name' in data:
+            profile.display_name = (data['display_name'] or '').strip()
+        if 'profile_photo' in request.FILES:
+            profile.profile_photo = request.FILES['profile_photo']
+        elif request.data.get('remove_profile_photo') in (True, 'true', '1'):
+            profile.profile_photo = None
+        profile.save()
+        return Response(UserSerializer(user, context={'request': request}).data)
+    return Response(UserSerializer(request.user, context={'request': request}).data)
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def change_password(request):
+    """Change password. Body: { current_password, new_password }."""
+    user = request.user
+    current = request.data.get('current_password') or ''
+    new_pw = request.data.get('new_password') or ''
+    if not current:
+        return Response({'current_password': ['This field is required.']}, status=status.HTTP_400_BAD_REQUEST)
+    if not new_pw:
+        return Response({'new_password': ['This field is required.']}, status=status.HTTP_400_BAD_REQUEST)
+    if not user.check_password(current):
+        return Response({'current_password': ['Current password is incorrect.']}, status=status.HTTP_400_BAD_REQUEST)
+    if len(new_pw) < 8:
+        return Response({'new_password': ['Password must be at least 8 characters.']}, status=status.HTTP_400_BAD_REQUEST)
+    user.set_password(new_pw)
+    user.save()
+    return Response({'detail': 'Password updated.'})
 
 
 @api_view(['POST'])
@@ -87,7 +126,11 @@ class PlaceViewSet(ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Place.objects.filter(members__user=self.request.user).distinct()
+        return (
+            Place.objects.filter(members__user=self.request.user)
+            .distinct()
+            .prefetch_related('members__user')
+        )
 
     def get_permissions(self):
         return [IsAuthenticated(), IsPlaceMember()]
@@ -136,17 +179,28 @@ class ExpenseCategoryViewSet(ModelViewSet):
 
 # ----- Expenses (nested under place) -----
 
+
+class ExpensePageNumberPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
+
+
 class ExpenseViewSet(ModelViewSet):
     serializer_class = ExpenseSerializer
     permission_classes = [IsAuthenticated]
+    pagination_class = ExpensePageNumberPagination
 
     def get_queryset(self):
         place_id = self.kwargs.get('place_id')
         if not place_id or not PlaceMember.objects.filter(place_id=place_id, user=self.request.user).exists():
             return Expense.objects.none()
-        return Expense.objects.filter(place_id=place_id).select_related(
-            'paid_by', 'added_by', 'category', 'place'
-        ).prefetch_related('splits__user')
+        return (
+            Expense.objects.filter(place_id=place_id)
+            .select_related('paid_by', 'added_by', 'category', 'place')
+            .prefetch_related('splits__user')
+            .order_by('-created_at')
+        )
 
     def _can_edit_expense(self, request, expense):
         if not expense.place.members.filter(user=request.user).exists():
@@ -277,9 +331,25 @@ def invite_by_token(request, token):
 
 # ----- Summary -----
 
-def _period_dates(period, from_date=None):
-    """Return (start_date, end_date) for period 'weekly' or 'fortnightly'. from_date is period end (default today)."""
-    end = from_date or timezone.now().date()
+def _sunday_of_week(d):
+    """Return the Sunday of the week containing d (week = Monday–Sunday)."""
+    return d + timedelta(days=(6 - d.weekday()))
+
+
+def _saturday_of_week(d):
+    """Return the Saturday of the week containing d (week = Sunday–Saturday)."""
+    return d + timedelta(days=(5 - d.weekday()) % 7)
+
+
+def _period_dates(period, from_date=None, week_start='monday'):
+    """Return (start_date, end_date) for period 'weekly' or 'fortnightly'.
+    week_start: 'monday' (week = Mon–Sun) or 'sunday' (week = Sun–Sat).
+    from_date is period end; default is end of current week."""
+    today = timezone.now().date()
+    if from_date is not None:
+        end = from_date
+    else:
+        end = _saturday_of_week(today) if week_start == 'sunday' else _sunday_of_week(today)
     if period == 'weekly':
         start = end - timedelta(days=6)
     elif period == 'fortnightly':
@@ -289,38 +359,17 @@ def _period_dates(period, from_date=None):
     return start, end
 
 
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def place_summary(request, place_id):
-    """
-    GET /api/places/<id>/summary/?period=weekly|fortnightly&from=YYYY-MM-DD
-    Returns: total_expense, my_expense, others_expense, total_i_owe, total_owed_to_me, by_member_balance
-    """
-    if not PlaceMember.objects.filter(place_id=place_id, user=request.user).exists():
-        return Response({'error': 'Not a member'}, status=status.HTTP_403_FORBIDDEN)
-    period = request.query_params.get('period', 'weekly')
-    from_param = request.query_params.get('from')
-    from_date = None
-    if from_param:
-        try:
-            from_date = date.fromisoformat(from_param)
-        except ValueError:
-            pass
-    start_date, end_date = _period_dates(period, from_date)
-
+def _compute_period_summary(place_id, me, start_date, end_date):
+    """Returns total_expense, my_expense, total_i_paid, balance_with (dict user_id -> Decimal)."""
     expenses = Expense.objects.filter(
         place_id=place_id,
         date__gte=start_date,
         date__lte=end_date,
     ).prefetch_related('splits__user')
-
     total_expense = sum(e.amount for e in expenses)
-    me = request.user
     my_expense = Decimal('0')
     total_i_paid = Decimal('0')
-    # balance_with[user_id] = amount they owe me (positive) or I owe them (negative)
     balance_with = {}
-
     for exp in expenses:
         splits = list(exp.splits.all())
         n = len(splits) or 1
@@ -336,10 +385,68 @@ def place_summary(request, place_id):
                 balance_with[s.user_id] = balance_with.get(s.user_id, Decimal('0')) - share
             elif s.user_id == me.id:
                 balance_with[exp.paid_by_id] = balance_with.get(exp.paid_by_id, Decimal('0')) + share
+    return total_expense, my_expense, total_i_paid, balance_with
 
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def place_summary(request, place_id):
+    """
+    GET /api/places/<id>/summary/?period=weekly|fortnightly&from=YYYY-MM-DD
+    Returns: period stats, previous period total for comparison, by_member_balance list with usernames.
+    """
+    if not PlaceMember.objects.filter(place_id=place_id, user=request.user).exists():
+        return Response({'error': 'Not a member'}, status=status.HTTP_403_FORBIDDEN)
+    period = request.query_params.get('period', 'weekly')
+    week_start = request.query_params.get('week_start', 'monday')
+    if week_start not in ('monday', 'sunday'):
+        week_start = 'monday'
+    from_param = request.query_params.get('from')
+    from_date = None
+    if from_param:
+        try:
+            from_date = date.fromisoformat(from_param)
+        except ValueError:
+            pass
+    me = request.user
+    start_date, end_date = _period_dates(period, from_date, week_start)
+
+    total_expense, my_expense, total_i_paid, balance_with = _compute_period_summary(
+        place_id, me, start_date, end_date
+    )
+    others_expense = total_expense - my_expense
     total_i_owe = sum(v for v in balance_with.values() if v > 0)
     total_owed_to_me = sum(-v for v in balance_with.values() if v < 0)
-    others_expense = total_expense - my_expense
+
+    # Previous period for comparison (same length, ending day before current start)
+    prev_end = start_date - timedelta(days=1)
+    prev_start, _ = _period_dates(period, prev_end, week_start)
+    prev_total, prev_my, _, _ = _compute_period_summary(place_id, me, prev_start, prev_end)
+    spending_change_pct = None
+    if prev_total and prev_total > 0:
+        spending_change_pct = round(((float(total_expense) - float(prev_total)) / float(prev_total)) * 100)
+    elif prev_total == 0 and total_expense == 0:
+        spending_change_pct = 0  # same as last period (no spending both)
+    # When prev_total == 0 and total_expense > 0 we leave spending_change_pct None so frontend can show "Up from no spending"
+
+    # Member balance list with usernames and display names (balance: positive = I owe them, negative = they owe me)
+    user_ids = list(balance_with.keys())
+    user_map = {}
+    if user_ids:
+        for u in User.objects.filter(id__in=user_ids).select_related('profile'):
+            display_name = (getattr(u.profile, 'display_name', None) or '').strip() or u.username
+            user_map[u.id] = {'username': u.username, 'display_name': display_name}
+    by_member_balance_list = [
+        {
+            'user_id': uid,
+            'username': (user_map.get(uid) or {}).get('username') or f'User {uid}',
+            'display_name': (user_map.get(uid) or {}).get('display_name') or user_map.get(uid, {}).get('username') or f'User {uid}',
+            'balance': float(balance_with[uid]),
+        }
+        for uid in user_ids
+    ]
+    # Sort: they owe me first (negative balance), then I owe them (positive), by abs amount desc
+    by_member_balance_list.sort(key=lambda x: (x['balance'] >= 0, -abs(x['balance'])))
 
     return Response({
         'period': period,
@@ -352,4 +459,7 @@ def place_summary(request, place_id):
         'total_i_owe': float(total_i_owe),
         'total_owed_to_me': float(total_owed_to_me),
         'by_member_balance': {str(k): float(v) for k, v in balance_with.items()},
+        'by_member_balance_list': by_member_balance_list,
+        'previous_total_expense': float(prev_total),
+        'spending_change_percent': spending_change_pct,
     })

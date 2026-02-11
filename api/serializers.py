@@ -1,14 +1,35 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
-from .models import Place, PlaceMember, ExpenseCategory, Expense, ExpenseSplit, PlaceInvite
+from .models import Place, PlaceMember, ExpenseCategory, Expense, ExpenseSplit, PlaceInvite, UserProfile
 
 User = get_user_model()
 
 
 class UserSerializer(serializers.ModelSerializer):
+    display_name = serializers.SerializerMethodField()
+    profile_photo = serializers.SerializerMethodField()
+
     class Meta:
         model = User
-        fields = ['id', 'username', 'email']
+        fields = ['id', 'username', 'email', 'display_name', 'profile_photo']
+
+    def get_display_name(self, obj):
+        try:
+            name = (getattr(obj.profile, 'display_name', None) or '').strip()
+            return name or obj.username
+        except UserProfile.DoesNotExist:
+            return obj.username
+
+    def get_profile_photo(self, obj):
+        try:
+            if obj.profile.profile_photo:
+                request = self.context.get('request')
+                if request:
+                    return request.build_absolute_uri(obj.profile.profile_photo.url)
+                return obj.profile.profile_photo.url
+        except UserProfile.DoesNotExist:
+            pass
+        return None
 
 
 class PlaceMemberSerializer(serializers.ModelSerializer):
@@ -65,10 +86,42 @@ class ExpenseSplitSerializer(serializers.ModelSerializer):
         fields = ['id', 'user']
 
 
+class ExpenseCategoryField(serializers.PrimaryKeyRelatedField):
+    """Accept category ID on write; return nested { id, name } on read."""
+    def __init__(self, **kwargs):
+        kwargs.setdefault('queryset', ExpenseCategory.objects.none())
+        kwargs.setdefault('allow_null', True)
+        kwargs.setdefault('required', False)
+        super().__init__(**kwargs)
+
+    def to_internal_value(self, data):
+        if data is None or data == '':
+            return None
+        return super().to_internal_value(data)
+
+    def to_representation(self, value):
+        if value is None:
+            return None
+        # Django/DRF may pass PKOnlyObject (only pk, no name); fetch full instance for serialization
+        if not hasattr(value, 'name'):
+            try:
+                pk = getattr(value, 'pk', value)
+                value = ExpenseCategory.objects.get(pk=pk)
+            except (ExpenseCategory.DoesNotExist, TypeError, ValueError):
+                return None
+        return ExpenseCategorySerializer(value).data
+
+    def get_queryset(self):
+        place = self.context.get('place')
+        if place:
+            return place.categories.all()
+        return ExpenseCategory.objects.none()
+
+
 class ExpenseSerializer(serializers.ModelSerializer):
     paid_by = UserSerializer(read_only=True)
     added_by = UserSerializer(read_only=True)
-    category = ExpenseCategorySerializer(read_only=True)
+    category = ExpenseCategoryField()
     splits = ExpenseSplitSerializer(many=True, read_only=True)
     split_user_ids = serializers.ListField(
         child=serializers.IntegerField(),
@@ -88,18 +141,24 @@ class ExpenseSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         split_user_ids = validated_data.pop('split_user_ids', [])
         user = self.context['request'].user
-        place = validated_data.get('place') or self.context.get('place')
+        place = validated_data.pop('place', None) or self.context.get('place')
         if not place or not place.members.filter(user=user).exists():
             raise serializers.ValidationError('You are not a member of this place.')
-        paid_by = validated_data.get('paid_by')
-        paid_by_id = getattr(paid_by, 'id', paid_by)
+        paid_by = validated_data.pop('paid_by', None)
+        paid_by_id = getattr(paid_by, 'id', paid_by) if paid_by is not None else None
         if not paid_by_id or not place.members.filter(user_id=paid_by_id).exists():
             paid_by = user
         elif isinstance(paid_by, int):
             paid_by = User.objects.get(pk=paid_by)
-        validated_data['paid_by'] = paid_by
-        validated_data['added_by'] = user
-        expense = Expense.objects.create(**validated_data)
+        expense = Expense.objects.create(
+            place=place,
+            paid_by=paid_by,
+            added_by=user,
+            amount=validated_data.get('amount'),
+            description=validated_data.get('description'),
+            date=validated_data.get('date'),
+            category=validated_data.get('category'),
+        )
         for uid in split_user_ids:
             if place.members.filter(user_id=uid).exists():
                 ExpenseSplit.objects.get_or_create(expense=expense, user_id=uid)

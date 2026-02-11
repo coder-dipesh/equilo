@@ -1,19 +1,32 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './AuthContext';
 import { ThemeProvider } from './ThemeContext';
-import ThemeToggle from './ThemeToggle';
+import { PreferencesProvider } from './PreferencesContext';
+import Navbar from './Navbar';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import Places from './pages/Places';
 import PlaceDetail from './pages/PlaceDetail';
+import Settings from './pages/Settings';
 import Join from './pages/Join';
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
   const next = window.location.pathname + window.location.search;
-  if (loading) return <div className="pb-8"><p>Loading…</p></div>;
+  if (loading) return <div className="min-h-screen pb-8 bg-bg"><p>Loading…</p></div>;
   if (!user) return <Navigate to={next ? `/login?next=${encodeURIComponent(next)}` : '/login'} replace />;
   return children;
+}
+
+function ProtectedLayout({ children }) {
+  return (
+    <div className="min-h-screen bg-bg text-text-primary">
+      <Navbar />
+      <main className="max-w-5xl w-full mx-auto px-4 sm:px-6 py-6">
+        {children}
+      </main>
+    </div>
+  );
 }
 
 function AppRoutes() {
@@ -26,7 +39,9 @@ function AppRoutes() {
         path="/"
         element={
           <ProtectedRoute>
-            <Places />
+            <ProtectedLayout>
+              <Places />
+            </ProtectedLayout>
           </ProtectedRoute>
         }
       />
@@ -34,7 +49,19 @@ function AppRoutes() {
         path="/places/:id"
         element={
           <ProtectedRoute>
-            <PlaceDetail />
+            <ProtectedLayout>
+              <PlaceDetail />
+            </ProtectedLayout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/settings"
+        element={
+          <ProtectedRoute>
+            <ProtectedLayout>
+              <Settings />
+            </ProtectedLayout>
           </ProtectedRoute>
         }
       />
@@ -48,12 +75,9 @@ export default function App() {
     <ThemeProvider>
       <BrowserRouter>
         <AuthProvider>
-          <div className="max-w-[560px] mx-auto px-6 py-6 relative">
-            <div className="fixed top-4 right-4 z-10 sm:right-auto sm:left-[calc(50%+280px+1.5rem)]">
-              <ThemeToggle />
-            </div>
+          <PreferencesProvider>
             <AppRoutes />
-          </div>
+          </PreferencesProvider>
         </AuthProvider>
       </BrowserRouter>
     </ThemeProvider>

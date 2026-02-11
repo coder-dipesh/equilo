@@ -11,7 +11,8 @@ export function ThemeProvider({ children }) {
   });
 
   useEffect(() => {
-    document.documentElement.setAttribute('data-theme', theme);
+    // Use DaisyUI theme "silk" for light mode (custom theme)
+    document.documentElement.setAttribute('data-theme', theme === 'light' ? 'silk' : 'dark');
     localStorage.setItem('theme', theme);
   }, [theme]);
 

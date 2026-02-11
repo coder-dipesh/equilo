@@ -20,7 +20,15 @@ export function AuthProvider({ children }) {
       setLoading(false);
       return;
     }
-    setLoading(false);
+    authApi.me()
+      .then((userData) => {
+        setUser(userData);
+        try {
+          localStorage.setItem('user', JSON.stringify(userData));
+        } catch {}
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
   }, []);
 
   const login = async (username, password) => {
@@ -37,9 +45,11 @@ export function AuthProvider({ children }) {
     const data = await authApi.register(username, email || '', password);
     localStorage.setItem('access', data.access);
     localStorage.setItem('refresh', data.refresh);
-    const userData = { id: data.user?.id, username: data.user?.username, email: data.user?.email };
+    const userData = data.user
+      ? { id: data.user.id, username: data.user.username, email: data.user.email, display_name: data.user.display_name, profile_photo: data.user.profile_photo }
+      : null;
     setUser(userData);
-    localStorage.setItem('user', JSON.stringify(userData));
+    if (userData) localStorage.setItem('user', JSON.stringify(userData));
     return data;
   };
 
@@ -50,8 +60,17 @@ export function AuthProvider({ children }) {
     setUser(null);
   };
 
+  const updateUser = (next) => {
+    setUser((prev) => (prev ? { ...prev, ...next } : null));
+    try {
+      const u = localStorage.getItem('user');
+      const parsed = u ? JSON.parse(u) : null;
+      if (parsed) localStorage.setItem('user', JSON.stringify({ ...parsed, ...next }));
+    } catch {}
+  };
+
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, register, logout, updateUser }}>
       {children}
     </AuthContext.Provider>
   );
