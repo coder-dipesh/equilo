@@ -331,8 +331,12 @@ export default function Navbar() {
 
   return (
     <>
-      {/* Notification sound – stored at public/sound/notification.mp3 */}
-      <audio id="notif-sound" src="/sound/notification.mp3" preload="auto" />
+      {/* Notification sound – public/sound/notification.mp3, use base for subpath deploys */}
+      <audio
+        id="notif-sound"
+        src={`${(import.meta.env.BASE_URL || '/').replace(/\/+$/, '') || ''}/sound/notification.mp3`}
+        preload="auto"
+      />
       {/* Brand strip */}
       <div className="h-1 w-full bg-primary" aria-hidden />
       <header

@@ -145,8 +145,28 @@ STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 # Media files (user uploads, e.g. profile photos)
-MEDIA_URL = 'media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+# In production: use Supabase Storage. In dev: local filesystem.
+SUPABASE_URL = os.environ.get('SUPABASE_URL', '').strip()
+SUPABASE_KEY = os.environ.get('SUPABASE_SERVICE_KEY') or os.environ.get('SUPABASE_KEY', '').strip()
+SUPABASE_MEDIA_BUCKET = os.environ.get('SUPABASE_MEDIA_BUCKET', 'media')
+# Ensure django-supabase-storage can read bucket name
+if SUPABASE_URL and SUPABASE_KEY:
+    os.environ.setdefault('SUPABASE_BUCKET_NAME', SUPABASE_MEDIA_BUCKET)
+
+if SUPABASE_URL and SUPABASE_KEY:
+    STORAGES = {
+        'default': {
+            'BACKEND': 'django_supabase_storage.SupabaseMediaStorage',
+        },
+        'staticfiles': {
+            'BACKEND': 'django.contrib.staticfiles.storage.StaticFilesStorage',
+        },
+    }
+    MEDIA_URL = f'{SUPABASE_URL.rstrip("/")}/storage/v1/object/public/{SUPABASE_MEDIA_BUCKET}/'
+    MEDIA_ROOT = ''  # Not used when Supabase is backend
+else:
+    MEDIA_URL = 'media/'
+    MEDIA_ROOT = BASE_DIR / 'media'
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

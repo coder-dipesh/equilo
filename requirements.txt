@@ -14,3 +14,6 @@ django-filter>=24.0
 
 # Production
 gunicorn>=21.0.0
+
+# Media in production (Supabase Storage)
+django-supabase-storage>=1.0.0
