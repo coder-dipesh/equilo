@@ -1,8 +1,10 @@
 import { useState, useRef, useMemo, useEffect } from 'react';
 import { createPortal } from 'react-dom';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 import { usePreferences } from '../PreferencesContext';
-import { auth as authApi } from '../api';
+import { useTheme } from '../ThemeContext';
+import { auth as authApi, getJtiFromRefreshToken } from '../api';
 import {
   User,
   Lock,
@@ -12,7 +14,6 @@ import {
   MessageCircle,
   FolderOpen,
   ArrowLeftRight,
-  MapPin,
   Download,
   Trash2,
   Camera,
@@ -22,6 +23,8 @@ import {
   X,
   Eye,
   EyeOff,
+  Sun,
+  Moon,
 } from 'lucide-react';
 
 function UserAvatar({ username, photoUrl, size = 'lg', className = '' }) {
@@ -54,16 +57,16 @@ const SIDEBAR_SECTIONS = [
   { id: 'notifications', label: 'Notifications', icon: MessageCircle },
   { id: 'preferences', label: 'PREFERENCES', isHeader: true },
   { id: 'general', label: 'General', icon: FolderOpen },
-  { id: 'expense-defaults', label: 'Expense Defaults', icon: ArrowLeftRight },
-  { id: 'regional', label: 'Regional', icon: MapPin },
   { id: 'data-privacy', label: 'DATA & PRIVACY', isHeader: true },
   { id: 'export', label: 'Export Data', icon: Download },
   { id: 'delete', label: 'Delete Account', icon: Trash2 },
 ];
 
 export default function Settings() {
+  const navigate = useNavigate();
   const { user, updateUser, logout } = useAuth();
-  const { currency, startOfWeek, setCurrency, setStartOfWeek, currencies, startOfWeekOptions } = usePreferences();
+  const { currency, startOfWeek, defaultSplitMethod, roundAmounts, setCurrency, setStartOfWeek, setDefaultSplitMethod, setRoundAmounts, currencies, startOfWeekOptions, splitMethodOptions } = usePreferences();
+  const { themePreference, setTheme } = useTheme();
   const [activeSection, setActiveSection] = useState('profile');
   const [displayName, setDisplayName] = useState(user?.display_name ?? user?.username ?? '');
   const [email, setEmail] = useState(user?.email ?? '');
@@ -73,6 +76,7 @@ export default function Settings() {
   const [message, setMessage] = useState({ type: '', text: '' });
   const [currencyModalOpen, setCurrencyModalOpen] = useState(false);
   const [startOfWeekModalOpen, setStartOfWeekModalOpen] = useState(false);
+  const [splitMethodModalOpen, setSplitMethodModalOpen] = useState(false);
   const [passwordModalOpen, setPasswordModalOpen] = useState(false);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -82,6 +86,17 @@ export default function Settings() {
   const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+  const [deletePassword, setDeletePassword] = useState('');
+  const [showDeletePassword, setShowDeletePassword] = useState(false);
+  const [deleteAccountLoading, setDeleteAccountLoading] = useState(false);
+  const [deleteAccountError, setDeleteAccountError] = useState('');
+  const [sessions, setSessions] = useState([]);
+  const [sessionsLoading, setSessionsLoading] = useState(false);
+  const [sessionsError, setSessionsError] = useState('');
+  const [revokingSessionId, setRevokingSessionId] = useState(null);
+  const [revokeAllLoading, setRevokeAllLoading] = useState(false);
+  const [registerLoading, setRegisterLoading] = useState(false);
   const fileInputRef = useRef(null);
 
   const NOTIFICATION_PREFS_KEY = 'equilo_notification_prefs';
@@ -93,7 +108,7 @@ export default function Settings() {
         const parsed = JSON.parse(s);
         return { ...defaultNotificationPrefs, ...parsed };
       }
-    } catch {}
+    } catch { /* empty */ }
     return defaultNotificationPrefs;
   });
   const [notificationPrefsSaved, setNotificationPrefsSaved] = useState(null);
@@ -113,6 +128,36 @@ export default function Settings() {
 
   const effectivePhotoUrl = photoPreviewUrl ?? (removePhoto ? '' : user?.profile_photo ?? '');
   const displayLabel = displayName.trim() || user?.username || '';
+
+  useEffect(() => {
+    if (activeSection !== 'security') return;
+    setSessionsLoading(true);
+    setSessionsError('');
+    const currentJti = getJtiFromRefreshToken();
+    const refresh = localStorage.getItem('refresh');
+
+    async function load() {
+      // Always ensure current device is registered when opening this page
+      if (refresh) {
+        try {
+          await authApi.sessions.register(refresh);
+        } catch (err) {
+          const msg = err.detail || err.message || 'Could not register this device';
+          setSessionsError(msg);
+        }
+      }
+      try {
+        const list = await authApi.sessions.list(currentJti);
+        setSessions(list);
+        if (list.length > 0) setSessionsError('');
+      } catch (err) {
+        setSessionsError(err.detail || err.message || 'Failed to load sessions');
+        setSessions([]);
+      }
+    }
+
+    load().finally(() => setSessionsLoading(false));
+  }, [activeSection]);
 
   const handleSelectPhoto = (e) => {
     const file = e.target.files?.[0];
@@ -179,12 +224,40 @@ export default function Settings() {
     }
   };
 
+  const closeDeleteModal = () => {
+    setDeleteModalOpen(false);
+    setDeletePassword('');
+    setDeleteAccountError('');
+    setShowDeletePassword(false);
+  };
+
+  const handleDeleteAccount = async (e) => {
+    e.preventDefault();
+    setDeleteAccountError('');
+    if (!deletePassword.trim()) {
+      setDeleteAccountError('Please enter your password.');
+      return;
+    }
+    setDeleteAccountLoading(true);
+    try {
+      await authApi.deleteAccount(deletePassword);
+      logout();
+      navigate('/login', { replace: true });
+    } catch (err) {
+      const msg = err.password?.[0] || err.detail || err.message || 'Failed to delete account.';
+      setDeleteAccountError(msg);
+    } finally {
+      setDeleteAccountLoading(false);
+    }
+  };
+
   return (
     <div className="pb-8">
       {/* Single container: rounded corners, shadow, thin vertical border between columns (no overflow-hidden to avoid clipping nav) */}
       <div className="rounded-xl border border-base-300 bg-surface shadow-card flex flex-col lg:flex-row min-h-0">
         {/* Sidebar: light gray/blue background, separated by border-r; rounded corners on its side */}
-        <aside className="lg:w-64 lg:min-w-64 shrink-0 flex flex-row lg:flex-col gap-4 lg:gap-0 overflow-x-auto lg:overflow-visible bg-base-200/70 lg:border-r border-base-300 rounded-t-xl lg:rounded-tl-xl lg:rounded-bl-xl lg:rounded-tr-none lg:rounded-br-none">
+        {/* On mobile: horizontal scroll tab bar that stays contained; on lg: vertical sidebar */}
+        <aside className="lg:w-64 lg:min-w-64 shrink-0 flex flex-row lg:flex-col gap-4 lg:gap-0 overflow-x-auto lg:overflow-visible overflow-y-hidden lg:overflow-y-visible bg-base-200/70 lg:border-r border-base-300 rounded-t-xl lg:rounded-tl-xl lg:rounded-bl-xl lg:rounded-tr-none lg:rounded-br-none scrollbar-none overscroll-x-contain">
           <div className="hidden lg:flex flex-col items-center lg:items-start gap-3 p-4 mb-2 shrink-0">
             <UserAvatar username={displayLabel} photoUrl={user?.profile_photo} size="md" />
             <div className="min-w-0 text-center lg:text-left">
@@ -192,11 +265,11 @@ export default function Settings() {
               <p className="text-xs text-text-secondary m-0">Member</p>
             </div>
           </div>
-          <nav className="flex lg:flex-col gap-0.5 shrink-0 min-w-0 px-2 lg:px-3 pb-2 lg:pb-4" aria-label="Settings">
+          <nav className="flex flex-nowrap lg:flex-col lg:flex-wrap gap-0.5 shrink-0 min-w-0 px-2 lg:px-3 pb-2 lg:pb-4 py-2 lg:py-0" aria-label="Settings">
             {SIDEBAR_SECTIONS.map((item) => {
               if (item.isHeader) {
                 return (
-                  <p key={item.id} className="text-xs font-semibold text-text-muted uppercase tracking-wide mt-4 mb-2 px-3 py-1 first:mt-0 shrink-0">
+                  <p key={item.id} className="hidden lg:block text-xs font-semibold text-text-muted uppercase tracking-wide mt-4 mb-2 px-3 py-1 first:mt-0 shrink-0">
                     {item.label}
                   </p>
                 );
@@ -208,7 +281,8 @@ export default function Settings() {
                   key={item.id}
                   type="button"
                   onClick={() => setActiveSection(item.id)}
-                  className={`w-full min-w-0 flex items-center gap-3 px-3 py-2.5 rounded-lg text-left text-sm font-medium transition-colors ${isActive ? 'bg-primary/10 text-primary border-l-4 border-l-primary' : 'text-text-primary hover:bg-base-300/50 border-l-4 border-l-transparent'}`}
+                  className={`flex items-center gap-2 lg:gap-3 px-3 py-2.5 rounded-lg text-left text-sm font-medium transition-colors whitespace-nowrap shrink-0 lg:w-full lg:min-w-0
+                    ${isActive ? 'bg-primary/10 text-primary border-b-2 lg:border-b-0 lg:border-l-4 border-b-primary lg:border-l-primary' : 'text-text-primary hover:bg-base-300/50 border-b-2 lg:border-l-4 border-b-transparent lg:border-l-transparent'}`}
                 >
                   <Icon className="w-4 h-4 shrink-0" aria-hidden />
                   <span className="truncate">{item.label}</span>
@@ -258,7 +332,7 @@ export default function Settings() {
                       type="text"
                       value={user?.username ?? ''}
                       readOnly
-                      className="input input-bordered w-full bg-base-200 border-base-300 rounded-lg cursor-not-allowed pr-10"
+                      className="input input-bordered w-full min-h-[44px] text-base bg-base-200 border-base-300 rounded-lg cursor-not-allowed pr-10"
                       aria-readonly="true"
                     />
                     <Lock className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted pointer-events-none" aria-hidden />
@@ -271,7 +345,7 @@ export default function Settings() {
                     type="text"
                     value={displayName}
                     onChange={(e) => setDisplayName(e.target.value)}
-                    className="input input-bordered w-full bg-base-100 border-base-300 rounded-lg"
+                    className="input input-bordered w-full min-h-[44px] text-base bg-base-100 border-base-300 rounded-lg"
                     placeholder="Your display name"
                     autoComplete="name"
                   />
@@ -283,7 +357,7 @@ export default function Settings() {
                     type="email"
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    className="input input-bordered w-full bg-base-100 border-base-300 rounded-lg"
+                    className="input input-bordered w-full min-h-[44px] text-base bg-base-100 border-base-300 rounded-lg"
                     placeholder="you@example.com"
                     autoComplete="email"
                   />
@@ -292,8 +366,8 @@ export default function Settings() {
                   <p className={`text-sm m-0 ${message.type === 'error' ? 'text-error' : 'text-success'}`} role="alert">{message.text}</p>
                 )}
                 <div className="flex gap-3 pt-2">
-                  <button type="submit" className="btn btn-primary rounded-lg" disabled={saving}>Save Changes</button>
-                  <button type="button" className="btn btn-ghost bg-base-100 border border-base-300 rounded-lg" onClick={() => { setDisplayName(user?.display_name ?? user?.username ?? ''); setEmail(user?.email ?? ''); setPhotoFile(null); setRemovePhoto(false); }}>Cancel</button>
+                  <button type="submit" className="btn btn-primary min-h-12 rounded-lg" disabled={saving}>Save Changes</button>
+                  <button type="button" className="btn btn-ghost bg-base-100 border border-base-300 min-h-12 rounded-lg" onClick={() => { setDisplayName(user?.display_name ?? user?.username ?? ''); setEmail(user?.email ?? ''); setPhotoFile(null); setRemovePhoto(false); }}>Cancel</button>
                 </div>
               </form>
             </div>
@@ -301,15 +375,16 @@ export default function Settings() {
 
           {activeSection === 'general' && (
             <div className="p-6 sm:p-8">
-              <h1 className="text-2xl font-bold text-text-primary m-0 mb-1">General</h1>
-              <p className="text-sm text-text-secondary m-0 mb-6">Currency and date preferences.</p>
+              <h1 className="text-2xl font-bold text-text-primary m-0 mb-1">General Preferences</h1>
+              <p className="text-sm text-text-secondary m-0 mb-6">Customize your default app preferences.</p>
               <div className="space-y-1 max-w-md">
+                {/* Currency */}
                 <div>
                   <button
                     type="button"
                     className="w-full flex items-center gap-3 px-3 py-3 rounded-lg hover:bg-base-200/60 transition-colors text-left focus:outline-none focus:ring-2 focus:ring-primary/20 focus:ring-inset border border-base-300 bg-base-100"
                     aria-expanded={currencyModalOpen}
-                    onClick={() => { setCurrencyModalOpen((o) => !o); setStartOfWeekModalOpen(false); }}
+                    onClick={() => { setCurrencyModalOpen((o) => !o); setStartOfWeekModalOpen(false); setSplitMethodModalOpen(false); }}
                   >
                     <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary"><CircleDollarSign className="w-5 h-5" /></span>
                     <span className="flex-1 text-sm font-medium text-text-primary">Currency</span>
@@ -331,12 +406,13 @@ export default function Settings() {
                     </div>
                   )}
                 </div>
+                {/* Start of Week */}
                 <div>
                   <button
                     type="button"
                     className="w-full flex items-center gap-3 px-3 py-3 rounded-lg hover:bg-base-200/60 transition-colors text-left focus:outline-none focus:ring-2 focus:ring-primary/20 focus:ring-inset border border-base-300 bg-base-100"
                     aria-expanded={startOfWeekModalOpen}
-                    onClick={() => { setStartOfWeekModalOpen((o) => !o); setCurrencyModalOpen(false); }}
+                    onClick={() => { setStartOfWeekModalOpen((o) => !o); setCurrencyModalOpen(false); setSplitMethodModalOpen(false); }}
                   >
                     <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary"><Calendar className="w-5 h-5" /></span>
                     <span className="flex-1 text-sm font-medium text-text-primary">Start of Week</span>
@@ -357,6 +433,71 @@ export default function Settings() {
                       </ul>
                     </div>
                   )}
+                </div>
+                {/* Default Split Method */}
+                <div>
+                  <button
+                    type="button"
+                    className="w-full flex items-center gap-3 px-3 py-3 rounded-lg hover:bg-base-200/60 transition-colors text-left focus:outline-none focus:ring-2 focus:ring-primary/20 focus:ring-inset border border-base-300 bg-base-100"
+                    aria-expanded={splitMethodModalOpen}
+                    onClick={() => { setSplitMethodModalOpen((o) => !o); setCurrencyModalOpen(false); setStartOfWeekModalOpen(false); }}
+                  >
+                    <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary"><ArrowLeftRight className="w-5 h-5" /></span>
+                    <span className="flex-1 text-sm font-medium text-text-primary">Default Split Method</span>
+                    <span className="text-sm text-text-secondary shrink-0">{splitMethodOptions.find((o) => o.value === defaultSplitMethod)?.label ?? 'Equal Split'}</span>
+                    <ChevronRight className="w-4 h-4 text-text-muted shrink-0" />
+                  </button>
+                  {splitMethodModalOpen && (
+                    <div className="mt-1 rounded-lg border border-base-300 bg-base-100 shadow-lg overflow-hidden">
+                      <ul className="list-none p-1 m-0">
+                        {splitMethodOptions.map((opt) => (
+                          <li key={opt.value}>
+                            <button type="button" className={`w-full flex items-center justify-between gap-2 px-3 py-2.5 rounded-md text-left text-sm font-medium ${defaultSplitMethod === opt.value ? 'bg-primary/15 text-primary' : 'text-text-primary hover:bg-base-200'}`} onClick={() => { setDefaultSplitMethod(opt.value); setSplitMethodModalOpen(false); }}>
+                              <span>{opt.label}</span>
+                              {defaultSplitMethod === opt.value && <span className="text-primary">✓</span>}
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+                {/* Round Amounts Automatically */}
+                <div className="flex items-center gap-3 px-3 py-3 rounded-lg border border-base-300 bg-base-100">
+                  <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary"><CircleDollarSign className="w-5 h-5" /></span>
+                  <span className="flex-1 text-sm font-medium text-text-primary">Round Amounts Automatically</span>
+                  <input
+                    type="checkbox"
+                    className="toggle toggle-primary"
+                    checked={roundAmounts}
+                    onChange={(e) => setRoundAmounts(e.target.checked)}
+                    aria-label="Round amounts automatically"
+                  />
+                </div>
+                {/* Theme */}
+                <div className="pt-2">
+                  <p className="text-sm font-medium text-text-primary mb-2">Theme</p>
+                  <div className="flex flex-col gap-1 rounded-lg border border-base-300 bg-base-100 overflow-hidden">
+                    {[
+                      { value: 'light', label: 'Light', Icon: Sun },
+                      { value: 'dark', label: 'Dark', Icon: Moon },
+                      { value: 'system', label: 'System', Icon: Monitor },
+                    ].map((item) => {
+                      const { value, label, Icon } = item;
+                      return (
+                        <button
+                          key={value}
+                          type="button"
+                          className={`w-full flex items-center gap-3 px-3 py-3 text-left text-sm font-medium border-b border-base-300 last:border-b-0 focus:outline-none focus:ring-2 focus:ring-primary/20 focus:ring-inset ${themePreference === value ? 'bg-primary/15 text-primary' : 'text-text-primary hover:bg-base-200'}`}
+                          onClick={() => setTheme(value)}
+                        >
+                          <Icon className="w-5 h-5 shrink-0" aria-hidden />
+                          <span className="flex-1">{label}</span>
+                          {themePreference === value && <ChevronRight className="w-4 h-4 text-primary shrink-0" aria-hidden />}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
             </div>
@@ -404,27 +545,106 @@ export default function Settings() {
                 {/* Active Sessions */}
                 <div className="rounded-xl border border-base-300 bg-base-100 p-4 sm:p-5">
                   <h2 className="font-semibold text-text-primary m-0 mb-3">Active Sessions</h2>
-                  <ul className="list-none p-0 m-0 space-y-2">
-                    <li>
-                      <div className="w-full flex items-center gap-3 p-3 rounded-lg border border-base-300 bg-primary/5 border-primary/30">
-                        <Monitor className="w-5 h-5 text-text-muted shrink-0" aria-hidden />
-                        <div className="min-w-0 flex-1">
-                          <p className="font-medium text-text-primary text-sm m-0">This device</p>
-                          <p className="text-xs text-text-secondary m-0">Active</p>
-                        </div>
-                        <ChevronRight className="w-4 h-4 text-text-muted shrink-0" aria-hidden />
-                      </div>
-                    </li>
-                  </ul>
-                  <button type="button" className="mt-3 text-sm text-primary hover:underline font-medium" onClick={() => logout()}>
-                    Log out from all devices
-                  </button>
+                  {sessionsError && (
+                    <p className="text-sm text-error m-0 mb-3">{sessionsError}</p>
+                  )}
+                  {sessionsLoading ? (
+                    <p className="text-sm text-text-secondary m-0">Loading sessions…</p>
+                  ) : sessions.length === 0 ? (
+                    <div>
+                      <p className="text-sm text-text-secondary m-0 mb-3">Sessions are added when you log in from a device. If this device is not listed, try the button below.</p>
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm rounded-lg"
+                        disabled={registerLoading || !localStorage.getItem('refresh')}
+                        onClick={async () => {
+                          const refresh = localStorage.getItem('refresh');
+                          if (!refresh) return;
+                          setRegisterLoading(true);
+                          setSessionsError('');
+                          try {
+                            await authApi.sessions.register(refresh);
+                            const list = await authApi.sessions.list(getJtiFromRefreshToken());
+                            setSessions(list);
+                          } catch (err) {
+                            setSessionsError(err.detail || err.message || 'Failed to register device');
+                          } finally {
+                            setRegisterLoading(false);
+                          }
+                        }}
+                      >
+                        {registerLoading ? 'Registering…' : 'Register this device'}
+                      </button>
+                    </div>
+                  ) : (
+                    <ul className="list-none p-0 m-0 space-y-2">
+                      {sessions.map((s) => (
+                        <li key={s.id}>
+                          <div className={`w-full flex items-center gap-3 p-3 rounded-lg border ${s.is_current ? 'border-primary/30 bg-primary/5' : 'border-base-300'}`}>
+                            {s.device_label?.toLowerCase().includes('iphone') || s.device_label?.toLowerCase().includes('android') ? (
+                              <Smartphone className="w-5 h-5 text-text-muted shrink-0" aria-hidden />
+                            ) : (
+                              <Monitor className="w-5 h-5 text-text-muted shrink-0" aria-hidden />
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <p className="font-medium text-text-primary text-sm m-0">
+                                {s.device_label || 'Unknown device'}
+                                {s.is_current && <span className="ml-2 text-xs font-normal text-primary">(this device)</span>}
+                              </p>
+                              <p className="text-xs text-text-secondary m-0">
+                                {s.created_at ? new Date(s.created_at).toLocaleString() : 'Active'}
+                              </p>
+                            </div>
+                            {!s.is_current && (
+                              <button
+                                type="button"
+                                className="btn btn-ghost btn-xs rounded-lg text-error hover:bg-error/10"
+                                disabled={revokingSessionId === s.id}
+                                onClick={async () => {
+                                  setRevokingSessionId(s.id);
+                                  try {
+                                    await authApi.sessions.revoke(s.jti);
+                                    setSessions((prev) => prev.filter((x) => x.id !== s.id));
+                                  } catch (err) {
+                                    setSessionsError(err.detail || err.message || 'Failed to revoke');
+                                  } finally {
+                                    setRevokingSessionId(null);
+                                  }
+                                }}
+                              >
+                                {revokingSessionId === s.id ? 'Revoking…' : 'Revoke'}
+                              </button>
+                            )}
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {sessions.length > 1 && (
+                    <button
+                      type="button"
+                      className="mt-3 text-sm text-primary hover:underline font-medium disabled:opacity-50"
+                      disabled={revokeAllLoading}
+                      onClick={async () => {
+                        const refresh = localStorage.getItem('refresh');
+                        if (!refresh) return;
+                        setRevokeAllLoading(true);
+                        try {
+                          await authApi.sessions.revokeAll(refresh);
+                          setSessions((prev) => prev.filter((s) => s.is_current));
+                          setRevokeAllLoading(false);
+                        } catch (err) {
+                          setSessionsError(err.detail || err.message || 'Failed to revoke all');
+                          setRevokeAllLoading(false);
+                        }
+                      }}
+                    >
+                      {revokeAllLoading ? 'Revoking…' : 'Log out from all other devices'}
+                    </button>
+                  )}
                 </div>
 
-                <div className="flex gap-3 pt-2 justify-end">
-                  <button type="button" className="btn btn-primary rounded-lg">Save Changes</button>
-                  <button type="button" className="btn bg-base-100 border border-base-300 rounded-lg">Cancel</button>
-                </div>
+                
               </div>
             </div>
           )}
@@ -466,7 +686,9 @@ export default function Settings() {
                       const s = localStorage.getItem(NOTIFICATION_PREFS_KEY);
                       if (s) setNotificationPrefs({ ...defaultNotificationPrefs, ...JSON.parse(s) });
                       else setNotificationPrefs(defaultNotificationPrefs);
-                    } catch {}
+                    } catch (err) {
+                      console.warn('Failed to restore notification preferences from storage', err);
+                    }
                   }}
                 >
                   Cancel
@@ -479,7 +701,9 @@ export default function Settings() {
                       localStorage.setItem(NOTIFICATION_PREFS_KEY, JSON.stringify(notificationPrefs));
                       setNotificationPrefsSaved(true);
                       setTimeout(() => setNotificationPrefsSaved(null), 2000);
-                    } catch {}
+                    } catch (err) {
+                      console.error('Failed to save notification preferences', err);
+                    }
                   }}
                 >
                   Save Changes
@@ -489,7 +713,28 @@ export default function Settings() {
             </div>
           )}
 
-          {['expense-defaults', 'regional', 'export', 'delete'].includes(activeSection) && (
+          {activeSection === 'delete' && (
+            <div className="p-6 sm:p-8">
+              <h1 className="text-2xl font-bold text-text-primary m-0 mb-1">Delete Account</h1>
+              <p className="text-sm text-text-secondary m-0 mb-6">Permanently delete your account.</p>
+              <div className="max-w-2xl">
+                <div className="rounded-xl border border-base-300 bg-base-100 p-5 sm:p-6 shadow-sm">
+                  <p className="text-sm text-text-primary m-0 mb-6">
+                    Once your account is deleted, all of its resources and data will be permanently deleted. Before deleting your account, please download any data or information that you wish to retain.
+                  </p>
+                  <button
+                    type="button"
+                    className="btn btn-error rounded-lg"
+                    onClick={() => setDeleteModalOpen(true)}
+                  >
+                    Delete Account
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {activeSection === 'export' && (
             <div className="p-6 sm:p-8">
               <h1 className="text-2xl font-bold text-text-primary m-0 mb-1">
                 {SIDEBAR_SECTIONS.find((s) => s.id === activeSection)?.label ?? activeSection}
@@ -505,7 +750,7 @@ export default function Settings() {
       {passwordModalOpen && createPortal(
         <>
           <div className="fixed inset-0 z-[9998] bg-black/30" aria-hidden onClick={() => { setPasswordModalOpen(false); setPasswordMessage({ type: '', text: '' }); setCurrentPassword(''); setNewPassword(''); setConfirmPassword(''); setShowCurrentPassword(false); setShowNewPassword(false); setShowConfirmPassword(false); }} />
-          <div className="fixed left-1/2 top-1/2 z-[9999] w-[min(calc(100vw-2rem),400px)] -translate-x-1/2 -translate-y-1/2 rounded-xl bg-base-100 border border-base-300 shadow-xl p-6" role="dialog" aria-modal="true" aria-labelledby="password-dialog-title">
+          <div className="fixed left-1/2 top-1/2 z-[9999] w-[min(calc(100vw-2rem),400px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl bg-base-100 border border-base-300 shadow-xl p-6" role="dialog" aria-modal="true" aria-labelledby="password-dialog-title">
             <div className="flex items-center justify-between mb-4">
               <h2 id="password-dialog-title" className="text-lg font-semibold text-text-primary m-0">Change password</h2>
               <button type="button" className="btn btn-ghost btn-sm btn-square rounded-lg" onClick={() => { setPasswordModalOpen(false); setPasswordMessage({ type: '', text: '' }); setCurrentPassword(''); setNewPassword(''); setConfirmPassword(''); setShowCurrentPassword(false); setShowNewPassword(false); setShowConfirmPassword(false); }} aria-label="Close">
@@ -516,34 +761,89 @@ export default function Settings() {
               <div>
                 <label htmlFor="current-password" className="block text-sm font-medium text-text-primary mb-1.5">Current password</label>
                 <div className="relative">
-                  <input id="current-password" type={showCurrentPassword ? 'text' : 'password'} value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} className="input input-bordered w-full rounded-lg pr-10" placeholder="Enter current password" required autoComplete="current-password" />
-                  <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 btn btn-ghost btn-sm btn-square rounded-lg text-text-muted hover:text-text-primary" onClick={() => setShowCurrentPassword((v) => !v)} aria-label={showCurrentPassword ? 'Hide password' : 'Show password'}>
-                    {showCurrentPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  <input id="current-password" type={showCurrentPassword ? 'text' : 'password'} value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} className="input input-bordered w-full min-h-[44px] text-base rounded-lg pr-10" placeholder="Enter current password" required autoComplete="current-password" />
+                  <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-lg text-text-muted hover:text-text-primary hover:bg-base-200 transition" onClick={() => setShowCurrentPassword((v) => !v)} aria-label={showCurrentPassword ? 'Hide password' : 'Show password'}>
+                    {showCurrentPassword ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
                   </button>
                 </div>
               </div>
               <div>
                 <label htmlFor="new-password" className="block text-sm font-medium text-text-primary mb-1.5">New password</label>
                 <div className="relative">
-                  <input id="new-password" type={showNewPassword ? 'text' : 'password'} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="input input-bordered w-full rounded-lg pr-10" placeholder="At least 8 characters" required minLength={8} autoComplete="new-password" />
-                  <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 btn btn-ghost btn-sm btn-square rounded-lg text-text-muted hover:text-text-primary" onClick={() => setShowNewPassword((v) => !v)} aria-label={showNewPassword ? 'Hide password' : 'Show password'}>
-                    {showNewPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  <input id="new-password" type={showNewPassword ? 'text' : 'password'} value={newPassword} onChange={(e) => setNewPassword(e.target.value)} className="input input-bordered w-full min-h-[44px] text-base rounded-lg pr-10" placeholder="At least 8 characters" required minLength={8} autoComplete="new-password" />
+                  <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-lg text-text-muted hover:text-text-primary hover:bg-base-200 transition" onClick={() => setShowNewPassword((v) => !v)} aria-label={showNewPassword ? 'Hide password' : 'Show password'}>
+                    {showNewPassword ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
                   </button>
                 </div>
               </div>
               <div>
                 <label htmlFor="confirm-password" className="block text-sm font-medium text-text-primary mb-1.5">Confirm new password</label>
                 <div className="relative">
-                  <input id="confirm-password" type={showConfirmPassword ? 'text' : 'password'} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="input input-bordered w-full rounded-lg pr-10" placeholder="Confirm new password" required autoComplete="new-password" />
-                  <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 btn btn-ghost btn-sm btn-square rounded-lg text-text-muted hover:text-text-primary" onClick={() => setShowConfirmPassword((v) => !v)} aria-label={showConfirmPassword ? 'Hide password' : 'Show password'}>
-                    {showConfirmPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  <input id="confirm-password" type={showConfirmPassword ? 'text' : 'password'} value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} className="input input-bordered w-full min-h-[44px] text-base rounded-lg pr-10" placeholder="Confirm new password" required autoComplete="new-password" />
+                  <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-lg text-text-muted hover:text-text-primary hover:bg-base-200 transition" onClick={() => setShowConfirmPassword((v) => !v)} aria-label={showConfirmPassword ? 'Hide password' : 'Show password'}>
+                    {showConfirmPassword ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
                   </button>
                 </div>
               </div>
               {passwordMessage.text && <p className={`text-sm m-0 ${passwordMessage.type === 'error' ? 'text-error' : 'text-success'}`} role="alert">{passwordMessage.text}</p>}
               <div className="flex gap-3 justify-end pt-2">
-                <button type="button" className="btn bg-base-100 border border-base-300 rounded-lg" onClick={() => { setPasswordModalOpen(false); setPasswordMessage({ type: '', text: '' }); setCurrentPassword(''); setNewPassword(''); setConfirmPassword(''); setShowCurrentPassword(false); setShowNewPassword(false); setShowConfirmPassword(false); }}>Cancel</button>
-                <button type="submit" className="btn btn-primary rounded-lg" disabled={passwordChanging}>{passwordChanging ? 'Updating…' : 'Update password'}</button>
+                <button type="button" className="btn bg-base-100 border border-base-300 min-h-12 rounded-lg" onClick={() => { setPasswordModalOpen(false); setPasswordMessage({ type: '', text: '' }); setCurrentPassword(''); setNewPassword(''); setConfirmPassword(''); setShowCurrentPassword(false); setShowNewPassword(false); setShowConfirmPassword(false); }}>Cancel</button>
+                <button type="submit" className="btn btn-primary min-h-12 rounded-lg" disabled={passwordChanging}>{passwordChanging ? 'Updating…' : 'Update password'}</button>
+              </div>
+            </form>
+          </div>
+        </>,
+        document.body
+      )}
+
+      {/* Delete account confirmation modal */}
+      {deleteModalOpen && createPortal(
+        <>
+          <div className="fixed inset-0 z-[9998] bg-black/30" aria-hidden onClick={closeDeleteModal} />
+          <div className="fixed left-1/2 top-1/2 z-[9999] w-[min(calc(100vw-2rem),400px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl bg-base-100 border border-base-300 shadow-xl p-6" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title">
+            <div className="flex items-center justify-between mb-4">
+              <h2 id="delete-dialog-title" className="text-lg font-semibold text-text-primary m-0">Delete account</h2>
+              <button type="button" className="btn btn-ghost btn-sm btn-square rounded-lg" onClick={closeDeleteModal} aria-label="Close">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <p className="text-sm text-text-secondary m-0 mb-4">Enter your password to permanently delete your account and all associated data. This cannot be undone.</p>
+            <form onSubmit={handleDeleteAccount} className="space-y-4">
+              <div>
+                <label htmlFor="delete-password" className="block text-sm font-medium text-text-primary mb-1.5">Password</label>
+                <div className="relative">
+                  <input
+                    id="delete-password"
+                    type={showDeletePassword ? 'text' : 'password'}
+                    value={deletePassword}
+                    onChange={(e) => setDeletePassword(e.target.value)}
+                    className="input input-bordered w-full min-h-[44px] text-base rounded-lg pr-10"
+                    placeholder="Enter your password"
+                    autoComplete="current-password"
+                  />
+                  <button type="button" className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center rounded-lg text-text-muted hover:text-text-primary hover:bg-base-200 transition" onClick={() => setShowDeletePassword((v) => !v)} aria-label={showDeletePassword ? 'Hide password' : 'Show password'}>
+                    {showDeletePassword ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+              {deleteAccountError && (
+                <div className="rounded-lg border border-error/30 bg-error/10 p-4 flex gap-3" role="alert">
+                  <span className="shrink-0 text-error" aria-hidden>
+                    <X className="w-5 h-5" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="font-medium text-error m-0 mb-1">Oops, something went wrong!</p>
+                    <ul className="text-sm text-error m-0 pl-4 list-disc">
+                      <li>{deleteAccountError}</li>
+                    </ul>
+                  </div>
+                </div>
+              )}
+              <div className="flex gap-3 justify-end pt-2">
+                <button type="button" className="btn bg-base-100 border border-base-300 min-h-12 rounded-lg" onClick={closeDeleteModal}>Cancel</button>
+                <button type="submit" className="btn btn-error min-h-12 rounded-lg" disabled={deleteAccountLoading}>
+                  {deleteAccountLoading ? 'Deleting…' : 'Delete Account'}
+                </button>
               </div>
             </form>
           </div>

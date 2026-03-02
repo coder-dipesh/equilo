@@ -2,20 +2,195 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useSearchParams, Link } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 import { usePreferences } from '../PreferencesContext';
-import { places as placesApi, expenses, categories, summary, invites, placeMembers } from '../api';
-import { Trash2, Pencil, Filter, Calendar, Users, X, Check, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, Scale, Wallet, CircleDollarSign, Clock, TrendingUp, TrendingDown } from 'lucide-react';
+import { Skeleton } from '../components/Skeleton';
+import CallyDatePicker from '../components/CallyDatePicker';
+import { places as placesApi, expenses, categories, summary, invites, placeMembers, cycles as cyclesApi, settlements as settlementsApi, settlementCreate } from '../api';
+import {
+  Trash2, Pencil, Filter, Calendar, Users, X, Check, ChevronLeft, ChevronRight, ChevronDown, ChevronUp,
+  Scale, Wallet, CircleDollarSign, Clock, TrendingUp, TrendingDown, CheckCircle2, CalendarRange, Info, PlayCircle, RotateCcw,
+  Home, Receipt, Building2, Zap, Droplets, Flame, Wifi, Smartphone, ShoppingCart, Sparkles, Bath, UtensilsCrossed,
+  Package, Tv, Music, CreditCard, PartyPopper, CalendarDays, Search, Plus, Copy, Share2, RefreshCw, Loader2,
+} from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from 'recharts';
 
-// Explicit hex colors for Recharts (matches fintech brand – SVG does not resolve CSS variables)
+// Explicit hex colors for Recharts (design system primary #0967F7 – SVG does not resolve CSS variables)
 const CHART_COLORS = {
-  primary: '#1F5BFF',
-  primaryLight: '#AFCBFF',
-  primaryMuted: '#4D7CFF',
-  othersShare: '#DDE3EA',
-  navy: '#0B2166',
+  primary: '#0967F7',
+  primaryLight: '#99C3FF',
+  primaryMuted: '#3E86FF',
+  othersShare: '#D5DDF1',
+  navy: '#031941',
 };
 
+/** Category group order for picker */
+const CATEGORY_GROUP_ORDER = ['Household', 'Utilities',  'Social', 'Subscriptions', 'Housing',  'Other'];
+
+/** Category name → { group, Icon } for display. Unknown names go to Other with CircleDollarSign. */
+const CATEGORY_META = {
+  'Rent': { group: 'Housing', Icon: Home },
+  'Bond / Deposit': { group: 'Housing', Icon: Receipt },
+  'Strata / Building Fees': { group: 'Housing', Icon: Building2 },
+  'Electricity': { group: 'Utilities', Icon: Zap },
+  'Water': { group: 'Utilities', Icon: Droplets },
+  'Gas': { group: 'Utilities', Icon: Flame },
+  'Internet': { group: 'Utilities', Icon: Wifi },
+  'Mobile (Shared Plan)': { group: 'Utilities', Icon: Smartphone },
+  'Groceries': { group: 'Household', Icon: ShoppingCart },
+  'Cleaning Supplies': { group: 'Household', Icon: Sparkles },
+  'Toiletries': { group: 'Household', Icon: Bath },
+  'Kitchen Supplies': { group: 'Household', Icon: UtensilsCrossed },
+  'Household Items': { group: 'Household', Icon: Package },
+  'Netflix': { group: 'Subscriptions', Icon: Tv },
+  'Spotify': { group: 'Subscriptions', Icon: Music },
+  'Amazon Prime': { group: 'Subscriptions', Icon: CreditCard },
+  'Other Shared Subscriptions': { group: 'Subscriptions', Icon: CreditCard },
+  'Takeaway': { group: 'Social', Icon: UtensilsCrossed },
+  'Dining Out': { group: 'Social', Icon: UtensilsCrossed },
+  'House Party': { group: 'Social', Icon: PartyPopper },
+  'Shared Events': { group: 'Social', Icon: CalendarDays },
+  'Other': { group: 'Other', Icon: CircleDollarSign },
+};
+
+function getCategoryMeta(name) {
+  return CATEGORY_META[name] || { group: 'Other', Icon: CircleDollarSign };
+}
+
+/** Type: subtle dot + muted label. fixed=purple, variable=green, one_time=red */
+function CategoryTypeBadge({ type }) {
+  if (!type) return null;
+  const dotColor = type === 'fixed' ? 'bg-violet-500' : type === 'one_time' ? 'bg-red-500' : 'bg-emerald-500';
+  const label = type === 'fixed' ? 'Fixed' : type === 'one_time' ? 'One-time' : 'Variable';
+  return (
+    <span className="inline-flex items-center gap-1.5 shrink-0 text-[11px] text-text-muted" title={label}>
+      <span className={`w-2 h-2 shrink-0 rounded-full ${dotColor}`} aria-hidden />
+      <span>{label}</span>
+    </span>
+  );
+}
+
 const VALID_TABS = ['expenses', 'summary', 'invite'];
+
+/** Today's date in local time as YYYY-MM-DD (for date inputs; avoids UTC mismatch). */
+function getTodayLocal() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * Premium category picker: modal bottom sheet with search, grouped list, icon + name + type badge.
+ * Selected row: soft blue bg + checkmark. Empty state: "Select category". Add Custom at bottom.
+ */
+function CategoryPickerModal({ onClose, categoryList, selectedId, onSelect, onAddCustom }) {
+  const [search, setSearch] = useState('');
+  const searchLower = search.trim().toLowerCase();
+  const filtered = searchLower
+    ? categoryList.filter((c) => c.name.toLowerCase().includes(searchLower))
+    : categoryList;
+
+  const byGroup = CATEGORY_GROUP_ORDER.reduce((acc, g) => {
+    acc[g] = filtered.filter((c) => getCategoryMeta(c.name).group === g);
+    return acc;
+  }, {});
+
+  return (
+    <>
+      <div className="fixed inset-0 z-[200] bg-black/40" aria-hidden onClick={onClose} />
+      <div className="fixed inset-0 z-[201] flex items-center justify-center p-4 pointer-events-none">
+        <div
+          className="w-full max-w-md max-h-[70vh] rounded-2xl bg-base-100 shadow-xl flex flex-col border border-base-300 pointer-events-auto"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Choose category"
+          onClick={(e) => e.stopPropagation()}
+        >
+        <div className="flex items-center justify-between px-4 pt-4 pb-2 shrink-0">
+          <h3 className="text-base font-semibold text-text-primary m-0">Category</h3>
+          <button type="button" onClick={onClose} className="btn btn-ghost btn-sm btn-square" aria-label="Close">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+        <div className="px-4 pb-3 shrink-0">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" aria-hidden />
+            <input
+              type="search"
+              placeholder="Search categories…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="input input-bordered w-full pl-9 pr-4 py-2.5 h-11 rounded-xl text-sm"
+              aria-label="Search categories"
+            />
+          </div>
+        </div>
+        <div className="overflow-y-auto overscroll-contain px-4 pb-4 flex-1 min-h-0">
+          {selectedId && (
+            <button
+              type="button"
+              onClick={() => { onSelect(null); onClose(); }}
+              className="w-full flex items-center gap-3 py-3 px-4 text-left text-text-muted hover:bg-base-200 rounded-xl mb-3 border border-dashed border-base-300"
+            >
+              <span className="text-sm">Clear selection</span>
+            </button>
+          )}
+          {CATEGORY_GROUP_ORDER.map((groupName) => {
+            const items = byGroup[groupName];
+            if (!items.length) return null;
+            return (
+              <div key={groupName} className="mb-4">
+                <p className="text-[11px] font-medium uppercase tracking-wide text-text-muted mb-2 px-1">{groupName}</p>
+                <div className="rounded-xl border border-base-300 overflow-hidden shadow-sm">
+                  {items.map((c) => {
+                    const { Icon } = getCategoryMeta(c.name);
+                    const selected = String(c.id) === String(selectedId);
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        onClick={() => { onSelect(c.id); onClose(); }}
+                        className={`w-full flex items-center gap-3 py-3 px-4 text-left transition-colors rounded-none first:rounded-t-xl last:rounded-b-xl ${selected ? 'bg-primary/10' : 'hover:bg-base-200'}`}
+                      >
+                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-base-300 text-primary">
+                          <Icon className="w-4 h-4" aria-hidden />
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <p className="text-sm font-medium text-text-primary m-0 truncate">{c.name}</p>
+                          <p className="text-[11px] text-text-muted m-0 truncate">{getCategoryMeta(c.name).group}</p>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <CategoryTypeBadge type={c.category_type} />
+                          {selected && <Check className="w-5 h-5 text-primary shrink-0" aria-hidden />}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })}
+          {filtered.length === 0 && (
+            <p className="text-sm text-text-muted text-center py-6 m-0">No categories match &quot;{search}&quot;</p>
+          )}
+        </div>
+        {onAddCustom && (
+          <div className="p-4 pt-2 border-t border-base-300 shrink-0">
+            <button
+              type="button"
+              onClick={() => { onClose(); onAddCustom(); }}
+              className="btn btn-outline w-full gap-2 rounded-xl py-3"
+            >
+              <Plus className="w-4 h-4" />
+              Add custom category
+            </button>
+          </div>
+        )}
+        </div>
+      </div>
+    </>
+  );
+}
 
 export default function PlaceDetail() {
   const { id } = useParams();
@@ -23,7 +198,8 @@ export default function PlaceDetail() {
   const { user } = useAuth();
   const { currency, startOfWeek } = usePreferences();
   const tabFromUrl = searchParams.get('tab');
-  const tab = VALID_TABS.includes(tabFromUrl) ? tabFromUrl : 'expenses';
+  const editExpenseIdFromUrl = searchParams.get('editExpense');
+  const tab = editExpenseIdFromUrl ? 'expenses' : (VALID_TABS.includes(tabFromUrl) ? tabFromUrl : 'expenses');
 
   const [place, setPlace] = useState(null);
   const [expenseList, setExpenseList] = useState([]);
@@ -33,12 +209,21 @@ export default function PlaceDetail() {
   const [summaryData, setSummaryData] = useState(null);
   const [period, setPeriod] = useState('weekly');
   const [summaryPeriodEnd, setSummaryPeriodEnd] = useState(null);
+  const [cycleList, setCycleList] = useState([]);
+  const [selectedCycleId, setSelectedCycleId] = useState(null);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteList, setInviteList] = useState([]);
   const [members, setMembers] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [expenseToEditFromUrl, setExpenseToEditFromUrl] = useState(null);
 
   const isOwner = place?.members?.some((m) => m.user?.id === user?.id && m.role === 'owner');
+
+  function clearEditExpenseFromUrl() {
+    searchParams.delete('editExpense');
+    setSearchParams(searchParams, { replace: true });
+    setExpenseToEditFromUrl(null);
+  }
 
   function load() {
     if (!id) {
@@ -47,21 +232,33 @@ export default function PlaceDetail() {
       return;
     }
     setLoading(true);
-    Promise.all([
-      placesApi.get(id),
-      expenses(id).list({ page: 1, page_size: 10 }),
-      summary(id, period, summaryPeriodEnd || undefined, startOfWeek),
-      placeMembers(id).list(),
-    ])
-      .then(([p, ex, sum, mem]) => {
+    // Fetch place first; only treat place fetch failure as "not found"
+    placesApi
+      .get(id)
+      .then((p) => {
         setPlace(p);
-        const list = Array.isArray(ex) ? ex : (ex?.results ?? []);
-        const count = Array.isArray(ex) ? ex.length : (ex?.count ?? list.length);
-        setExpenseList(list);
-        setExpensePage(1);
-        setExpenseTotalCount(count);
-        setSummaryData(sum);
-        setMembers(mem);
+        // Then load expenses, summary, members (don't fail the whole page if these fail)
+        Promise.allSettled([
+          expenses(id).list({ page: 1, page_size: 10 }),
+          selectedCycleId != null
+            ? summary(id, { cycle_id: selectedCycleId })
+            : summary(id, { period, from: summaryPeriodEnd || undefined, weekStart: startOfWeek }),
+          placeMembers(id).list(),
+          cyclesApi(id).list(),
+        ]).then((results) => {
+          const [exRes, sumRes, memRes, cyRes] = results;
+          if (exRes.status === 'fulfilled') {
+            const ex = exRes.value;
+            const list = Array.isArray(ex) ? ex : (ex?.results ?? []);
+            const count = Array.isArray(ex) ? ex.length : (ex?.count ?? list.length);
+            setExpenseList(list);
+            setExpensePage(1);
+            setExpenseTotalCount(count);
+          }
+          if (sumRes.status === 'fulfilled') setSummaryData(sumRes.value);
+          if (memRes.status === 'fulfilled') setMembers(memRes.value);
+          if (cyRes.status === 'fulfilled') setCycleList(Array.isArray(cyRes.value) ? cyRes.value : []);
+        });
       })
       .catch(() => setPlace(null))
       .finally(() => setLoading(false));
@@ -81,29 +278,101 @@ export default function PlaceDetail() {
       .catch(() => {});
   }
 
-  useEffect(() => load(), [id, startOfWeek]);
+  useEffect(() => { void load(); }, [id, startOfWeek]); // eslint-disable-line react-hooks/set-state-in-effect, react-hooks/exhaustive-deps
+
+  // Open edit expense modal when navigating from Activity with ?editExpense=id
   useEffect(() => {
-    if (id && place) {
-      summary(id, period, summaryPeriodEnd || undefined, startOfWeek).then(setSummaryData).catch(() => {});
+    if (!id || !place || !editExpenseIdFromUrl) {
+      setExpenseToEditFromUrl(null); // eslint-disable-line react-hooks/set-state-in-effect
+      return;
     }
-  }, [id, period, summaryPeriodEnd, place, startOfWeek]);
+    const expenseId = editExpenseIdFromUrl.trim();
+    if (!expenseId) return;
+    let cancelled = false;
+    expenses(id)
+      .get(expenseId)
+      .then((exp) => {
+        if (!cancelled) setExpenseToEditFromUrl(exp);
+      })
+      .catch(() => {
+        if (!cancelled) setExpenseToEditFromUrl(null);
+      });
+    return () => { cancelled = true; };
+  }, [id, place, editExpenseIdFromUrl]);
+
+  // Background refresh only when tab is visible (saves server load when tab is in background)
+  useEffect(() => {
+    if (!id || !place) return;
+    const POLL_MS = 25000; // 25s when visible
+    let intervalId = null;
+
+    function refreshSilent() {
+      Promise.allSettled([
+        expenses(id).list({ page: expensePage, page_size: expensePageSize }),
+        selectedCycleId != null
+          ? summary(id, { cycle_id: selectedCycleId })
+          : summary(id, { period, from: summaryPeriodEnd || undefined, weekStart: startOfWeek }),
+        placeMembers(id).list(),
+        cyclesApi(id).list(),
+      ]).then((results) => {
+        const [exRes, sumRes, memRes, cyRes] = results;
+        if (exRes.status === 'fulfilled') {
+          const ex = exRes.value;
+          const list = Array.isArray(ex) ? ex : (ex?.results ?? []);
+          const count = Array.isArray(ex) ? ex.length : (ex?.count ?? list.length);
+          setExpenseList(list);
+          setExpenseTotalCount(count);
+        }
+        if (sumRes.status === 'fulfilled') setSummaryData(sumRes.value);
+        if (memRes.status === 'fulfilled') setMembers(memRes.value);
+        if (cyRes.status === 'fulfilled') setCycleList(Array.isArray(cyRes.value) ? cyRes.value : []);
+      });
+    }
+
+    function startPolling() {
+      refreshSilent(); // one immediate refresh when tab becomes visible
+      intervalId = window.setInterval(refreshSilent, POLL_MS);
+    }
+
+    function stopPolling() {
+      if (intervalId) {
+        window.clearInterval(intervalId);
+        intervalId = null;
+      }
+    }
+
+    function onVisibilityChange() {
+      if (document.visibilityState === 'visible') startPolling();
+      else stopPolling();
+    }
+
+    if (document.visibilityState === 'visible') startPolling();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      stopPolling();
+    };
+  }, [id, place, expensePage, expensePageSize, period, summaryPeriodEnd, startOfWeek, selectedCycleId]);
 
   useEffect(() => {
     if (!id || !place) return;
-    const interval = setInterval(() => {
-      expenses(id)
-        .list({ page: expensePage, page_size: expensePageSize })
-        .then((data) => {
-          const list = Array.isArray(data) ? data : (data?.results ?? []);
-          setExpenseList(list);
-          if (!Array.isArray(data) && data?.count != null) setExpenseTotalCount(data.count);
-        })
-        .catch(() => {});
-      summary(id, period, summaryPeriodEnd || undefined, startOfWeek).then(setSummaryData).catch(() => {});
-      placeMembers(id).list().then(setMembers).catch(() => {});
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [id, place, period, summaryPeriodEnd, expensePage, expensePageSize, startOfWeek]);
+    const params = selectedCycleId != null
+      ? { cycle_id: selectedCycleId }
+      : { period, from: summaryPeriodEnd || undefined, weekStart: startOfWeek };
+    summary(id, params).then(setSummaryData).catch(() => {});
+  }, [id, period, summaryPeriodEnd, place, startOfWeek, selectedCycleId]);
+
+  const currentCycle = cycleList.find((c) => c.status === 'open') || null;
+
+  useEffect(() => {
+    if (cycleList.length === 0) return;
+    if (selectedCycleId != null) return;
+    if (currentCycle) {
+      setSelectedCycleId(currentCycle.id); // eslint-disable-line react-hooks/set-state-in-effect
+    } else {
+      setSelectedCycleId(cycleList[0].id);
+    }
+  }, [cycleList.length, currentCycle?.id, selectedCycleId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (place && tab === 'invite' && !isOwner) {
@@ -117,51 +386,99 @@ export default function PlaceDetail() {
     }
   }, [tab, id, isOwner]);
 
-  if (loading && !place) return <div className="pb-8"><p>Loading…</p></div>;
+  if (loading && !place) {
+    return (
+      <div className="pb-8 animate-fade-in">
+        <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-sm text-text-muted mb-4">
+          <Skeleton className="h-4 w-12" />
+          <ChevronRight className="w-4 h-4 shrink-0 text-text-muted/50" aria-hidden />
+          <Skeleton className="h-4 w-20" />
+          <ChevronRight className="w-4 h-4 shrink-0 text-text-muted/50" aria-hidden />
+          <Skeleton className="h-4 w-24" />
+        </nav>
+        <header className="flex items-center justify-between gap-4 mb-6">
+          <Skeleton className="h-7 w-48 sm:w-64" />
+        </header>
+        <nav className="flex gap-1 mb-6">
+          <Skeleton className="h-9 w-20 rounded-lg" />
+          <Skeleton className="h-9 w-20 rounded-lg" />
+          <Skeleton className="h-9 w-16 rounded-lg" />
+        </nav>
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-base-300 bg-surface shadow-card p-4 sm:p-6">
+            <div className="space-y-4">
+              {[1, 2, 3, 4].map((i) => (
+                <div key={i} className="flex items-center gap-3 p-3 rounded-xl border border-base-300">
+                  <Skeleton className="h-10 w-10 rounded-lg shrink-0" />
+                  <div className="flex-1 min-w-0 space-y-2">
+                    <Skeleton className="h-4 w-full max-w-[200px]" />
+                    <Skeleton className="h-3 w-32" />
+                  </div>
+                  <Skeleton className="h-6 w-16 rounded shrink-0" />
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
   if (!place) {
     return (
       <div className="pb-8 max-w-md">
         <p className="text-text-primary font-medium m-0 mb-1">Place not found</p>
         <p className="text-sm text-text-secondary m-0 mb-4">
-          This place may not exist, or you may not have access to it. Go back to your list and open a place from there.
+          This place may not exist, or you may not have access to it. Go back to your places list and open a place from there.
         </p>
-        <Link to="/" className="btn btn-primary btn-sm">Back to places</Link>
+        <Link to="/places" className="btn btn-primary btn-sm">Back to places</Link>
       </div>
     );
   }
 
   return (
     <div className="min-h-screen pb-8 bg-bg">
+      <nav aria-label="Breadcrumb" className="flex items-center gap-1.5 text-sm text-text-muted mb-4">
+        <Link to="/" className="link link-hover text-text-secondary hover:text-primary">Home</Link>
+        <ChevronRight className="w-4 h-4 shrink-0" aria-hidden />
+        <Link to="/places" className="link link-hover text-text-secondary hover:text-primary">Place</Link>
+        <ChevronRight className="w-4 h-4 shrink-0" aria-hidden />
+        <span className="text-text-primary font-medium truncate max-w-[180px] sm:max-w-none" aria-current="page" title={place.name}>{place.name}</span>
+      </nav>
       <header className="flex items-center justify-between gap-4 mb-6">
-        <Link to="/" className="link link-hover text-sm opacity-80">← Places</Link>
-        <h1 className="text-xl font-semibold m-0">{place.name}</h1>
+        <h1 className="text-xl font-semibold m-0 truncate">{place.name}</h1>
       </header>
 
-      <nav className="flex gap-1 mb-6">
-        <button
-          type="button"
-          className={`btn btn-sm ${tab === 'expenses' ? 'btn-primary' : 'btn-ghost'}`}
-          onClick={() => setSearchParams({ tab: 'expenses' })}
-        >
-          Expenses
-        </button>
-        <button
-          type="button"
-          className={`btn btn-sm ${tab === 'summary' ? 'btn-primary' : 'btn-ghost'}`}
-          onClick={() => setSearchParams({ tab: 'summary' })}
-        >
-          Summary
-        </button>
-        {isOwner && (
+      <nav role="tablist" className="tabs tabs-lift mb-6">
           <button
             type="button"
-            className={`btn btn-sm ${tab === 'invite' ? 'btn-primary' : 'btn-ghost'}`}
-            onClick={() => setSearchParams({ tab: 'invite' })}
+            role="tab"
+            className={`tab ${tab === 'expenses' ? 'tab-active' : ''}`}
+            onClick={() => setSearchParams({ tab: 'expenses' })}
+            aria-selected={tab === 'expenses'}
           >
-            Invite
+            Expenses
           </button>
-        )}
-      </nav>
+          <button
+            type="button"
+            role="tab"
+            className={`tab ${tab === 'summary' ? 'tab-active' : ''}`}
+            onClick={() => setSearchParams({ tab: 'summary' })}
+            aria-selected={tab === 'summary'}
+          >
+            Summary
+          </button>
+          {isOwner && (
+            <button
+              type="button"
+              role="tab"
+              className={`tab ${tab === 'invite' ? 'tab-active' : ''}`}
+              onClick={() => setSearchParams({ tab: 'invite' })}
+              aria-selected={tab === 'invite'}
+            >
+              Invite
+            </button>
+          )}
+        </nav>
 
       {tab === 'expenses' && (
         <ExpensesSection
@@ -177,6 +494,10 @@ export default function PlaceDetail() {
           currentUser={user}
           isOwner={isOwner}
           currency={currency}
+          expenseToEditFromUrl={expenseToEditFromUrl}
+          onClearEditFromUrl={clearEditExpenseFromUrl}
+          currentCycle={currentCycle}
+          onSwitchToSummary={() => setSearchParams({ tab: 'summary' })}
         />
       )}
       {tab === 'summary' && summaryData && (
@@ -186,20 +507,56 @@ export default function PlaceDetail() {
           setPeriod={setPeriod}
           summaryPeriodEnd={summaryPeriodEnd}
           setSummaryPeriodEnd={setSummaryPeriodEnd}
+          cycleList={cycleList}
+          currentCycle={currentCycle}
+          selectedCycleId={selectedCycleId}
+          setSelectedCycleId={setSelectedCycleId}
+          onResolveCycle={(cycleId) => cyclesApi(id).resolve(cycleId).then(load)}
+          onReopenCycle={(cycleId) => cyclesApi(id).reopen(cycleId).then(load)}
+          onStartNewCycle={() =>
+            cyclesApi(id)
+              .create({})
+              .then((cycle) => {
+                setCycleList((prev) => [cycle, ...prev]);
+                setSelectedCycleId(cycle.id);
+                load();
+              })
+          }
           members={members}
           currentUserId={user?.id}
+          currentUser={user}
           currency={currency}
+          placeId={id}
+          placeName={place?.name}
+          isPlaceCreator={isOwner}
+          onRefreshSummary={load}
         />
       )}
       {tab === 'invite' && isOwner && (
-        <InviteSection placeId={id} placeName={place?.name} inviteEmail={inviteEmail} setInviteEmail={setInviteEmail} inviteList={inviteList} onRefresh={() => invites(id).list().then(setInviteList)} />
+        <InviteSection
+          placeId={id}
+          placeName={place?.name}
+          inviteEmail={inviteEmail}
+          setInviteEmail={setInviteEmail}
+          inviteList={inviteList}
+          onRefresh={() => invites(id).list().then(setInviteList)}
+          members={members}
+          currentUserId={user?.id}
+        />
       )}
     </div>
   );
 }
 
-function Avatar({ username, className = '' }) {
+function Avatar({ username, photoUrl, className = '' }) {
   const initial = username ? username.charAt(0).toUpperCase() : '?';
+  if (photoUrl) {
+    return (
+      <div className={`rounded-full overflow-hidden bg-base-300 shrink-0 w-8 h-8 ${className}`} aria-hidden>
+        <img src={photoUrl} alt="" className="w-full h-full object-cover" />
+      </div>
+    );
+  }
   return (
     <div className={`rounded-full bg-primary/20 text-primary flex items-center justify-center font-semibold text-sm shrink-0 w-8 h-8 ${className}`} aria-hidden>
       {initial}
@@ -207,7 +564,7 @@ function Avatar({ username, className = '' }) {
   );
 }
 
-function ExpenseCard({ expense, placeId, members, currentUser, isOwner, onRefresh, onEdit, currency }) {
+function ExpenseCard({ expense, placeId, members: _members, currentUser, isOwner, onRefresh, onEdit, currency }) {
   const canEdit = isOwner || (expense.added_by?.id === currentUser?.id);
   const sym = currency?.symbol ?? '$';
   const [swipeOffset, setSwipeOffset] = useState(0);
@@ -229,18 +586,19 @@ function ExpenseCard({ expense, placeId, members, currentUser, isOwner, onRefres
     offsetAtGestureStart.current = currentOffsetRef.current;
     didDrag.current = false;
   }
+  const ACTION_WIDTH = 140;
   function handleDragMove(clientX) {
     if (!canEdit) return;
     didDrag.current = true;
     const dx = dragStartX.current - clientX;
-    const next = Math.max(0, Math.min(offsetAtGestureStart.current + dx, 80));
+    const next = Math.max(0, Math.min(offsetAtGestureStart.current + dx, ACTION_WIDTH));
     currentOffsetRef.current = next;
     setSwipeOffset(next);
   }
   function handleDragEnd() {
     if (!canEdit) return;
     const current = currentOffsetRef.current;
-    if (current > 50) { setSwipeOffset(80); currentOffsetRef.current = 80; }
+    if (current > ACTION_WIDTH / 2) { setSwipeOffset(ACTION_WIDTH); currentOffsetRef.current = ACTION_WIDTH; }
     else { setSwipeOffset(0); currentOffsetRef.current = 0; }
   }
   function handleTouchStart(e) {
@@ -292,12 +650,12 @@ function ExpenseCard({ expense, placeId, members, currentUser, isOwner, onRefres
     try {
       await expenses(placeId).delete(expense.id);
       onRefresh();
-    } catch (err) {}
+    } catch { /* ignore */ }
     finally { setDeleting(false); }
   }
 
   return (
-    <li className="list-none mb-3 transition-[margin,opacity] duration-300 ease-out" style={{ marginBottom: deleting ? 0 : undefined }}>
+    <div className="mb-3 transition-[margin,opacity] duration-300 ease-out" style={{ marginBottom: deleting ? 0 : undefined }}>
       <div
         className="overflow-hidden transition-[max-height,opacity] duration-300 ease-out"
         style={{ maxHeight: deleting ? 0 : 400, opacity: deleting ? 0 : 1 }}
@@ -313,15 +671,34 @@ function ExpenseCard({ expense, placeId, members, currentUser, isOwner, onRefres
             style={{ touchAction: 'pan-y' }}
           >
             {canEdit && (
-              <button
-                type="button"
-                onClick={(e) => { e.stopPropagation(); handleDeleteClick(); }}
-                disabled={deleting}
-                className="absolute right-0 top-0 bottom-0 w-20 flex items-center justify-center bg-error/90 z-0 cursor-pointer border-0 text-error-content hover:bg-error transition-colors"
-                aria-label="Delete expense"
-              >
-                <Trash2 className="w-5 h-5 shrink-0" aria-hidden />
-              </button>
+              <div className="absolute right-0 top-0 bottom-0 flex z-0">
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSwipeOffset(0);
+                    currentOffsetRef.current = 0;
+                    setDetailOpen(false);
+                    onEdit?.(expense);
+                  }}
+                  disabled={deleting}
+                  className="flex flex-col items-center justify-center gap-1 w-[70px] min-h-full bg-base-300 hover:bg-base-300/90 active:opacity-90 text-base-content border-0 rounded-none"
+                  aria-label="Edit expense"
+                >
+                  <Pencil className="w-5 h-5 shrink-0" aria-hidden />
+                  <span className="text-xs font-medium">Edit</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); handleDeleteClick(); }}
+                  disabled={deleting}
+                  className="flex flex-col items-center justify-center gap-1 w-[70px] min-h-full bg-error hover:bg-error/90 active:opacity-90 text-error-content border-0 rounded-none rounded-r-xl"
+                  aria-label="Delete expense"
+                >
+                  <Trash2 className="w-5 h-5 shrink-0" aria-hidden />
+                  <span className="text-xs font-medium">Delete</span>
+                </button>
+              </div>
             )}
             <div
               className="relative z-10 min-w-0 transition-transform duration-200 ease-out cursor-pointer select-none bg-base-200 border-l-4 border-l-primary"
@@ -333,7 +710,7 @@ function ExpenseCard({ expense, placeId, members, currentUser, isOwner, onRefres
               aria-label={`View details for ${expense.description}, ${amountStr}`}
             >
               <div className="px-4 py-3.5 flex items-start gap-3">
-                <Avatar username={expense.paid_by?.display_name || expense.paid_by?.username} className="!w-10 !h-10 text-sm shrink-0 mt-0.5" />
+                <Avatar username={expense.paid_by?.display_name || expense.paid_by?.username} photoUrl={expense.paid_by?.profile_photo} className="!w-10 !h-10 text-sm shrink-0 mt-0.5" />
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <span className="font-semibold text-text-primary truncate">{expense.description}</span>
@@ -403,7 +780,7 @@ function ExpenseCard({ expense, placeId, members, currentUser, isOwner, onRefres
               </div>
               <div className="flex flex-wrap items-center gap-x-6 gap-y-3 text-sm text-text-secondary mb-6 pb-6 border-b border-base-300">
                 <span className="flex items-center gap-2.5">
-                  <Avatar username={expense.paid_by?.display_name || expense.paid_by?.username} className="!w-7 !h-7 text-xs" />
+                  <Avatar username={expense.paid_by?.display_name || expense.paid_by?.username} photoUrl={expense.paid_by?.profile_photo} className="!w-7 !h-7 text-xs" />
                   <span className="text-text-primary font-medium">{(expense.paid_by?.display_name || expense.paid_by?.username) ?? '—'}</span>
                 </span>
                 <span className="flex items-center gap-2">
@@ -427,7 +804,7 @@ function ExpenseCard({ expense, placeId, members, currentUser, isOwner, onRefres
                   <div className="flex flex-wrap gap-4">
                     {expense.splits.map((s) => (
                       <div key={s.user?.id ?? s.id} className="flex items-center gap-2.5">
-                        <Avatar username={s.user?.display_name || s.user?.username} className="!w-7 !h-7 text-xs" />
+                        <Avatar username={s.user?.display_name || s.user?.username} photoUrl={s.user?.profile_photo} className="!w-7 !h-7 text-xs" />
                         <span className="text-sm text-text-primary">{s.user?.display_name || s.user?.username}</span>
                       </div>
                     ))}
@@ -436,11 +813,11 @@ function ExpenseCard({ expense, placeId, members, currentUser, isOwner, onRefres
               )}
               {canEdit && (
                 <div className="flex gap-3 pt-2">
-                  <button type="button" className="btn btn-outline flex-1 btn-sm" onClick={() => { setDetailOpen(false); onEdit?.(expense); }}>
-                    <Pencil className="w-4 h-4 mr-1.5" aria-hidden /> Edit
+                  <button type="button" className="btn btn-outline flex-1 min-h-11 rounded-lg border-base-300 gap-2" onClick={() => { setDetailOpen(false); onEdit?.(expense); }}>
+                    <Pencil className="w-4 h-4 shrink-0" aria-hidden /> Edit
                   </button>
-                  <button type="button" className="btn btn-error flex-1 btn-sm" onClick={handleDeleteFromModal} disabled={deleting}>
-                    <Trash2 className="w-4 h-4 mr-1.5" aria-hidden /> {deleting ? 'Deleting…' : 'Delete'}
+                  <button type="button" className="btn btn-error flex-1 min-h-11 rounded-lg shadow-soft gap-2" onClick={handleDeleteFromModal} disabled={deleting}>
+                    <Trash2 className="w-4 h-4 shrink-0" aria-hidden /> {deleting ? 'Deleting…' : 'Delete'}
                   </button>
                 </div>
               )}
@@ -448,33 +825,55 @@ function ExpenseCard({ expense, placeId, members, currentUser, isOwner, onRefres
           </div>
         </div>
       )}
-    </li>
+    </div>
   );
 }
 
-function ExpensesSection({ placeId, place, expenseList, expensePage, expenseTotalCount, expensePageSize, onPageChange, members, onRefresh, currentUser, isOwner, currency }) {
+function ExpensesSection({ placeId, place, expenseList, expensePage, expenseTotalCount, expensePageSize, onPageChange, members, onRefresh, currentUser, isOwner, currency, expenseToEditFromUrl, onClearEditFromUrl, currentCycle, onSwitchToSummary }) {
   const [showForm, setShowForm] = useState(false);
   const [editingExpense, setEditingExpense] = useState(null);
   const [filterCategory, setFilterCategory] = useState('');
-  const [filterMyExpenses, setFilterMyExpenses] = useState(false);
+  const [filterPaidBy, setFilterPaidBy] = useState(''); // '' = anyone, 'me' = current user, or member user id
+  const [filterOnlyWhereImInSplit, setFilterOnlyWhereImInSplit] = useState(false);
+  const [showFiltersPanel, setShowFiltersPanel] = useState(false);
   const [categoryList, setCategoryList] = useState([]);
 
   useEffect(() => {
     categories(placeId).list().then(setCategoryList).catch(() => setCategoryList([]));
   }, [placeId]);
 
+  // Open edit modal when navigated from Activity with ?editExpense=id
+  useEffect(() => {
+    if (expenseToEditFromUrl?.id) {
+      setEditingExpense(expenseToEditFromUrl); // eslint-disable-line react-hooks/set-state-in-effect
+    }
+  }, [expenseToEditFromUrl]);
+
   const filteredList = expenseList.filter((exp) => {
     if (filterCategory && (exp.category?.id != null ? String(exp.category.id) : '') !== filterCategory) return false;
-    if (filterMyExpenses && exp.added_by?.id !== currentUser?.id) return false;
+    if (filterPaidBy) {
+      const paidById = exp.paid_by?.id ?? exp.paid_by;
+      if (filterPaidBy === 'me') {
+        if (paidById !== currentUser?.id) return false;
+      } else if (String(paidById) !== filterPaidBy) return false;
+    }
+    if (filterOnlyWhereImInSplit && currentUser?.id != null) {
+      const splitUserIds = (exp.splits ?? []).map((s) => s.user?.id ?? s.user).filter(Boolean);
+      if (!splitUserIds.includes(currentUser.id)) return false;
+    }
     return true;
   });
 
-  // Group by added date (created_at), newest first
+  // Group by expense date (transaction date), not by when it was added; newest first
   const groupedByAddedDate = (() => {
     const groups = {};
     for (const exp of filteredList) {
-      const raw = exp.created_at || exp.date;
-      const dateKey = raw ? new Date(raw).toISOString().slice(0, 10) : 'unknown';
+      const raw = exp.date || exp.created_at;
+      let dateKey = 'unknown';
+      if (raw) {
+        const s = typeof raw === 'string' ? raw.slice(0, 10) : '';
+        dateKey = /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : new Date(raw).toISOString().slice(0, 10);
+      }
       if (!groups[dateKey]) groups[dateKey] = [];
       groups[dateKey].push(exp);
     }
@@ -488,36 +887,86 @@ function ExpensesSection({ placeId, place, expenseList, expensePage, expenseTota
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }).toUpperCase();
   };
 
-  const hasActiveFilters = filterCategory || filterMyExpenses;
+  const hasActiveFilters = filterCategory || filterPaidBy || filterOnlyWhereImInSplit;
 
   return (
     <section>
+      {currentCycle == null && (
+        <div className="rounded-xl border border-warning/30 bg-warning/10 p-4 mb-4">
+          <p className="text-sm text-base-content/90 m-0 mb-2">No open cycle. Start a new cycle from the Summary tab to add expenses.</p>
+          <button type="button" className="btn btn-primary btn-sm" onClick={onSwitchToSummary}>
+            Go to Summary
+          </button>
+        </div>
+      )}
       <div className="flex justify-between items-center mb-4">
         <h2 className="text-h3 m-0">Expenses</h2>
-        <button
-          type="button"
-          className="btn btn-primary btn-sm"
-          onClick={() => setShowForm(!showForm)}
-        >
-          {showForm ? 'Cancel' : 'Add expense'}
-        </button>
+        <div className="flex items-center gap-2">
+          {expenseList.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowFiltersPanel(!showFiltersPanel)}
+              className={`btn btn-sm gap-1.5 relative ${showFiltersPanel ? 'btn-primary' : 'btn-ghost text-text-secondary hover:text-text-primary'}`}
+              aria-label={showFiltersPanel ? 'Hide filters' : 'Show filters'}
+              aria-expanded={showFiltersPanel}
+            >
+              <Filter className="w-4 h-4" aria-hidden />
+              <span>Filters</span>
+              {hasActiveFilters && !showFiltersPanel && (
+                <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-primary" aria-hidden />
+              )}
+            </button>
+          )}
+          <button
+            type="button"
+            className="btn btn-primary min-h-11 rounded-lg shadow-soft px-4"
+            onClick={() => setShowForm(!showForm)}
+            disabled={currentCycle == null}
+            title={currentCycle == null ? 'Start a cycle from Summary first' : ''}
+          >
+            {showForm ? 'Cancel' : 'Add expense'}
+          </button>
+        </div>
       </div>
-      {expenseList.length > 0 && (
-        <div className="flex flex-nowrap items-center gap-2 sm:gap-3 mb-4 p-3 rounded-lg bg-base-300/50 border border-base-300 overflow-x-auto">
+      {expenseList.length > 0 && showFiltersPanel && (
+        <div className="flex flex-col gap-3 mb-4 p-3 rounded-lg bg-base-300/50 border border-base-300">
           <span className="flex items-center gap-1.5 text-sm font-medium text-text-secondary shrink-0">
             <Filter className="w-4 h-4" aria-hidden /> Filters
           </span>
-          <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} className="select select-bordered select-sm shrink-0 w-auto max-w-[160px]" aria-label="Filter by category">
+          <div className="flex gap-2 sm:gap-3 w-full">
+            <select value={filterCategory} onChange={(e) => setFilterCategory(e.target.value)} className="select select-bordered select-sm flex-1 min-w-0 rounded-full" aria-label="Filter by category">
             <option value="">All categories</option>
-            {categoryList.map((c) => <option key={c.id} value={String(c.id)}>{c.name}</option>)}
+            {CATEGORY_GROUP_ORDER.map((groupName) => {
+              const items = categoryList.filter((c) => getCategoryMeta(c.name).group === groupName);
+              if (!items.length) return null;
+              return (
+                <optgroup key={groupName} label={groupName}>
+                  {items.map((c) => (
+                    <option key={c.id} value={String(c.id)}>{c.name}</option>
+                  ))}
+                </optgroup>
+              );
+            })}
           </select>
+            <select value={filterPaidBy} onChange={(e) => setFilterPaidBy(e.target.value)} className="select select-bordered select-sm flex-1 min-w-0 rounded-full" aria-label="Filter by who paid">
+            <option value="">Paid by: anyone</option>
+            <option value="me">Paid by: me</option>
+            {members.map((m) => (
+              <option key={m.id} value={String(m.user?.id)}>
+                Paid by: {m.user?.display_name || m.user?.username || 'Member'}
+              </option>
+            ))}
+          </select>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           <label className="flex items-center gap-2 cursor-pointer text-sm shrink-0 whitespace-nowrap">
-            <input type="checkbox" checked={filterMyExpenses} onChange={(e) => setFilterMyExpenses(e.target.checked)} className="checkbox checkbox-sm checkbox-primary" />
-            <span>My expenses</span>
+            <input type="checkbox" checked={filterOnlyWhereImInSplit} onChange={(e) => setFilterOnlyWhereImInSplit(e.target.checked)} className="checkbox checkbox-sm checkbox-primary" aria-label="Only expenses I'm in the split for" />
+            <span>Only where I&apos;m in the split</span>
           </label>
           {hasActiveFilters && (
-            <button type="button" className="btn btn-ghost btn-sm text-sm shrink-0 whitespace-nowrap" onClick={() => { setFilterCategory(''); setFilterMyExpenses(false); }}>Clear filters</button>
+            <button type="button" className="btn btn-ghost btn-sm text-sm shrink-0 whitespace-nowrap" onClick={() => { setFilterCategory(''); setFilterPaidBy(''); setFilterOnlyWhereImInSplit(false); }}>Clear filters</button>
           )}
+          </div>
         </div>
       )}
       {showForm && (
@@ -528,6 +977,7 @@ function ExpensesSection({ placeId, place, expenseList, expensePage, expenseTota
           onSaved={() => { setShowForm(false); onRefresh(); }}
           onCancel={() => setShowForm(false)}
           currency={currency}
+          currentCycle={currentCycle}
         />
       )}
       {expenseList.length === 0 ? (
@@ -593,8 +1043,16 @@ function ExpensesSection({ placeId, place, expenseList, expensePage, expenseTota
           placeId={placeId}
           members={members}
           expense={editingExpense}
-          onSaved={() => { setEditingExpense(null); onRefresh(); }}
-          onCancel={() => setEditingExpense(null)}
+          currentCycle={currentCycle}
+          onSaved={() => {
+            setEditingExpense(null);
+            onRefresh();
+            onClearEditFromUrl?.();
+          }}
+          onCancel={() => {
+            setEditingExpense(null);
+            onClearEditFromUrl?.();
+          }}
           currency={currency}
         />
       )}
@@ -602,12 +1060,17 @@ function ExpensesSection({ placeId, place, expenseList, expensePage, expenseTota
   );
 }
 
-function EditExpenseForm({ placeId, members, expense, onSaved, onCancel, currency }) {
-  const sym = currency?.symbol ?? '$';
+function EditExpenseForm({ placeId, members, expense, currentCycle, onSaved, onCancel, currency }) {
+  const _sym = currency?.symbol ?? '$';
   const catId = expense?.category && (typeof expense?.category === 'object' ? expense.category.id : expense.category);
+  // Use expense's cycle range when API returns full cycle; fallback to current cycle so date is always restricted
+  const cycleStart = expense?.cycle?.start_date ?? currentCycle?.start_date ?? null;
+  const cycleEnd = expense?.cycle?.end_date ?? currentCycle?.end_date ?? null;
+  const initialDate = expense?.date ?? getTodayLocal();
+  const clampedInitialDate = clampDateToRange(initialDate, cycleStart, cycleEnd);
   const [amount, setAmount] = useState(() => (expense ? String(expense.amount ?? '') : ''));
   const [description, setDescription] = useState(() => expense?.description ?? '');
-  const [date, setDate] = useState(() => expense?.date ?? new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(() => clampedInitialDate);
   const [paidBy, setPaidBy] = useState(() => expense?.paid_by?.id ?? expense?.paid_by ?? '');
   const [categoryId, setCategoryId] = useState(() => (catId != null ? String(catId) : ''));
   const [splitUserIds, setSplitUserIds] = useState(() => {
@@ -617,6 +1080,7 @@ function EditExpenseForm({ placeId, members, expense, onSaved, onCancel, currenc
   const [categoryList, setCategoryList] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [categoryPickerOpen, setCategoryPickerOpen] = useState(false);
 
   useEffect(() => {
     categories(placeId).list().then(setCategoryList).catch(() => setCategoryList([]));
@@ -625,7 +1089,7 @@ function EditExpenseForm({ placeId, members, expense, onSaved, onCancel, currenc
     if (expense?.splits?.length) {
       setSplitUserIds(expense.splits.map((s) => s.user?.id ?? s.user).filter(Boolean));
     }
-  }, [expense?.id]);
+  }, [expense?.id, expense?.splits]);
 
   function toggleSplit(uid) {
     setSplitUserIds((prev) =>
@@ -655,9 +1119,8 @@ function EditExpenseForm({ placeId, members, expense, onSaved, onCancel, currenc
     }
   }
 
-  const inputClass = "input input-bordered w-full min-h-[44px] text-base";
-  const labelClass = "label py-1 first:pt-0";
-  const labelTextClass = "label-text mt-4 first:mt-0 mb-1.5 text-sm font-medium opacity-80";
+  const inputClass = "input input-bordered w-full min-h-11 text-base rounded-lg border-base-300 bg-base-100 focus:ring-2 focus:ring-primary/20";
+  const labelClass = "block text-sm font-medium text-text-primary mb-1.5";
 
   if (!expense?.id) return null;
 
@@ -671,28 +1134,78 @@ function EditExpenseForm({ placeId, members, expense, onSaved, onCancel, currenc
     >
       <form
         onSubmit={handleSubmit}
-        className="card bg-base-200 border border-base-300 rounded-2xl p-4 sm:p-5 w-full max-w-md max-h-[85vh] overflow-y-auto shadow-xl text-base-content"
+        className="card bg-base-100 border border-base-300 rounded-2xl p-4 sm:p-5 w-full max-w-md max-h-[92vh] overflow-y-auto overflow-x-hidden scrollbar-none shadow-xl text-base-content space-y-4"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 id="edit-expense-title" className="text-h3 m-0 mb-4">Edit expense</h2>
-        {error && <div role="alert" className="alert alert-error text-sm mb-2"><span>{error}</span></div>}
-        <label htmlFor="edit-amount" className={labelClass}><span className={labelTextClass}>Amount *</span></label>
-        <input id="edit-amount" type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} required className={inputClass} />
-        <label htmlFor="edit-desc" className={labelClass}><span className={labelTextClass}>Description *</span></label>
-        <input id="edit-desc" type="text" value={description} onChange={(e) => setDescription(e.target.value)} required className={inputClass} />
-        <label htmlFor="edit-date" className={labelClass}><span className={labelTextClass}>Date</span></label>
-        <input id="edit-date" type="date" value={date} onChange={(e) => setDate(e.target.value)} className={inputClass} />
-        <label htmlFor="edit-paidby" className={labelClass}><span className={labelTextClass}>Paid by</span></label>
-        <select id="edit-paidby" value={paidBy} onChange={(e) => setPaidBy(Number(e.target.value))} className="select select-bordered w-full min-h-[44px] text-base">
+        <h2 id="edit-expense-title" className="text-h3 m-0">Edit expense</h2>
+        {error && <div role="alert" className="alert alert-error text-sm rounded-lg"><span>{error}</span></div>}
+        <div>
+          <label htmlFor="edit-amount" className={labelClass}>Amount *</label>
+          <input id="edit-amount" type="number" step="0.01" min="0" value={amount} onChange={(e) => setAmount(e.target.value)} onWheel={(e) => e.target.blur()} required className={inputClass} />
+        </div>
+        <div>
+          <label htmlFor="edit-desc" className={labelClass}>Description *</label>
+          <input id="edit-desc" type="text" value={description} onChange={(e) => setDescription(e.target.value)} required className={inputClass} />
+        </div>
+        <div>
+          <label htmlFor="edit-date" className={labelClass}>Date</label>
+        <CallyDatePicker
+          id="edit-date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          min={cycleStart ?? undefined}
+          max={cycleEnd ?? undefined}
+          inputClassName={`${inputClass} pr-10 has-calendar-icon`}
+          ariaLabel="Expense date"
+        />
+        {cycleStart && cycleEnd && (
+          <p className="text-xs text-text-muted mt-1">Within this cycle: {formatPeriodRange(cycleStart, cycleEnd)}</p>
+        )}
+        </div>
+        <div>
+          <label htmlFor="edit-paidby" className={labelClass}>Paid by</label>
+          <select id="edit-paidby" value={paidBy} onChange={(e) => setPaidBy(Number(e.target.value))} className="select select-bordered w-full min-h-11 text-base rounded-lg border-base-300 bg-base-100">
           {members.map((m) => <option key={m.id} value={m.user?.id}>{m.user?.display_name || m.user?.username}</option>)}
         </select>
-        <label htmlFor="edit-category" className={labelClass}><span className={labelTextClass}>Category</span></label>
-        <select id="edit-category" value={categoryId} onChange={(e) => setCategoryId(e.target.value)} className="select select-bordered w-full min-h-[44px] text-base">
-          <option value="">—</option>
-          {categoryList.map((c) => <option key={c.id} value={String(c.id)}>{c.name}</option>)}
-        </select>
-        <fieldset className="mt-4 mb-2 border-0 p-0">
-          <legend className={labelTextClass}>Split between</legend>
+        </div>
+        <div>
+          <label htmlFor="edit-category" className={labelClass}>Category</label>
+          <button
+            type="button"
+            id="edit-category"
+            onClick={() => setCategoryPickerOpen(true)}
+            className="flex items-center gap-2 w-full min-h-11 px-2 rounded-lg border border-base-300 bg-base-100 text-left hover:border-base-400 transition-colors"
+            aria-label="Choose category"
+          >
+            {categoryId ? (() => {
+              const c = categoryList.find((x) => String(x.id) === String(categoryId));
+              if (!c) return <span className="text-text-muted">Select category</span>;
+              const { Icon } = getCategoryMeta(c.name);
+              return (
+                <>
+                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-base-300 text-primary">
+                    <Icon className="w-4 h-4" aria-hidden />
+                  </span>
+                  <span className="flex-1 min-w-0 truncate text-text-primary font-medium">{c.name}</span>
+                  <CategoryTypeBadge type={c.category_type} />
+                </>
+              );
+            })() : (
+              <span className="text-text-muted">Select category</span>
+            )}
+          </button>
+          {categoryPickerOpen && (
+            <CategoryPickerModal
+              open={categoryPickerOpen}
+              onClose={() => setCategoryPickerOpen(false)}
+              categoryList={categoryList}
+              selectedId={categoryId}
+              onSelect={(id) => setCategoryId(id == null ? '' : String(id))}
+            />
+          )}
+        </div>
+        <fieldset className="border-0 p-0 m-0">
+          <legend className={labelClass}>Split between</legend>
           <div className="flex flex-nowrap gap-4 overflow-x-auto py-2 -mx-1">
             {members.map((m) => (
               <label key={m.id} className="flex items-center gap-2 cursor-pointer shrink-0 whitespace-nowrap min-h-[44px] py-1">
@@ -702,22 +1215,31 @@ function EditExpenseForm({ placeId, members, expense, onSaved, onCancel, currenc
             ))}
           </div>
         </fieldset>
-        <div className="flex gap-3 mt-6 pt-2">
-          <button type="button" className="btn btn-ghost flex-1" onClick={onCancel}>Cancel</button>
-          <button type="submit" className="btn btn-primary flex-1" disabled={saving}>{saving ? 'Saving…' : 'Save changes'}</button>
+        <div className="flex gap-3 pt-2">
+          <button type="button" className="btn btn-outline min-h-11 rounded-lg border-base-300 flex-1" onClick={onCancel}>Cancel</button>
+          <button type="submit" className="btn btn-primary min-h-11 rounded-lg shadow-soft flex-1" disabled={saving}>{saving ? 'Saving…' : 'Save changes'}</button>
         </div>
       </form>
     </div>
   );
 }
 
-function AddExpenseForm({ placeId, place, members, onSaved, onCancel, currency }) {
+function clampDateToRange(dateStr, startDate, endDate) {
+  if (!dateStr) return dateStr;
+  if (startDate && dateStr < startDate) return startDate;
+  if (endDate && dateStr > endDate) return endDate;
+  return dateStr;
+}
+
+function AddExpenseForm({ placeId, place: _place, members, onSaved, onCancel, currency, currentCycle }) {
   const { user } = useAuth();
   const sym = currency?.symbol ?? '$';
-  const today = new Date().toISOString().slice(0, 10);
+  const cycleStart = currentCycle?.start_date ?? null;
+  const cycleEnd = currentCycle?.end_date ?? null;
+  const defaultDate = clampDateToRange(getTodayLocal(), cycleStart, cycleEnd);
   const [amount, setAmount] = useState('');
   const [description, setDescription] = useState('');
-  const [date, setDate] = useState(today);
+  const [date, setDate] = useState(() => defaultDate);
   const [paidBy, setPaidBy] = useState(user?.id || '');
   const [categoryId, setCategoryId] = useState('');
   const [splitUserIds, setSplitUserIds] = useState(members.map((m) => m.user?.id).filter(Boolean));
@@ -725,9 +1247,11 @@ function AddExpenseForm({ placeId, place, members, onSaved, onCancel, currency }
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [newCategoryName, setNewCategoryName] = useState('');
+  const [newCategoryType, setNewCategoryType] = useState('variable');
   const [addingCategory, setAddingCategory] = useState(false);
   const [categoryError, setCategoryError] = useState('');
   const [showAddCategory, setShowAddCategory] = useState(false);
+  const [categoryPickerOpen, setCategoryPickerOpen] = useState(false);
 
   useEffect(() => {
     categories(placeId).list().then(setCategoryList).catch(() => setCategoryList([]));
@@ -740,7 +1264,7 @@ function AddExpenseForm({ placeId, place, members, onSaved, onCancel, currency }
     setCategoryError('');
     setAddingCategory(true);
     try {
-      const created = await categories(placeId).create(name);
+      const created = await categories(placeId).create(name, newCategoryType);
       if (created?.id != null) {
         setCategoryList((prev) => [...prev, created]);
         setCategoryId(String(created.id));
@@ -822,6 +1346,7 @@ function AddExpenseForm({ placeId, place, members, onSaved, onCancel, currency }
             min="0"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
+            onWheel={(e) => e.target.blur()}
             required
             className="flex-1 min-w-0 border-0 bg-transparent py-3 px-2 text-base focus:outline-none"
             aria-required="true"
@@ -848,18 +1373,18 @@ function AddExpenseForm({ placeId, place, members, onSaved, onCancel, currency }
 
       <div className="mb-4">
         <label htmlFor="exp-date" className={labelTextClass}>Date</label>
-        <div className="relative">
-          <input
-            id="exp-date"
-            type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-            className={`${inputClass} pr-10`}
-            aria-label="Expense date"
-          />
-          <Calendar className="absolute right-3 top-1/2 -translate-y-1/2 w-5 h-5 text-text-muted pointer-events-none" aria-hidden />
-        </div>
-        <p className="text-xs text-text-muted mt-1">Defaults to today</p>
+        <CallyDatePicker
+          id="exp-date"
+          value={date}
+          onChange={(e) => setDate(e.target.value)}
+          min={cycleStart ?? undefined}
+          max={cycleEnd ?? undefined}
+          inputClassName={`${inputClass} pr-10 has-calendar-icon`}
+          ariaLabel="Expense date"
+        />
+        <p className="text-xs text-text-muted mt-1">
+          {cycleStart && cycleEnd ? `Within current cycle (${formatPeriodRange(cycleStart, cycleEnd)})` : 'Defaults to today'}
+        </p>
       </div>
 
       <div className="mb-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
@@ -878,36 +1403,48 @@ function AddExpenseForm({ placeId, place, members, onSaved, onCancel, currency }
           </select>
         </div>
         <div>
-          <label htmlFor="exp-category" className={labelTextClass}>Category</label>
+          <label className={labelTextClass}>Category</label>
           <div className="flex gap-2 items-center">
-            <select
-              id="exp-category"
-              value={categoryId}
-              onChange={(e) => setCategoryId(e.target.value)}
-              className="select select-bordered flex-1 min-w-0 min-h-[44px] text-base rounded-lg"
-              aria-label="Expense category"
-            >
-              <option value="">—</option>
-              {categoryList.map((c) => (
-                <option key={c.id} value={String(c.id)}>{c.name}</option>
-              ))}
-            </select>
             <button
               type="button"
-              onClick={() => { setShowAddCategory((v) => !v); setCategoryError(''); }}
-              className="btn btn-outline btn-square shrink-0 min-w-[44px] min-h-[44px] rounded-lg"
-              title="Add category"
-              aria-label="Add new category"
-              aria-expanded={showAddCategory}
+              id="exp-category"
+              onClick={() => setCategoryPickerOpen(true)}
+              className="flex items-center gap-2 flex-1 min-w-0 min-h-11 px-2 rounded-lg border border-base-300 bg-base-100 text-left hover:border-base-400 transition-colors"
+              aria-label="Choose category"
             >
-              +
+              {categoryId ? (() => {
+                const c = categoryList.find((x) => String(x.id) === String(categoryId));
+                if (!c) return <span className="text-text-muted">Select category</span>;
+                const { Icon } = getCategoryMeta(c.name);
+                return (
+                  <>
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-base-300 text-primary">
+                      <Icon className="w-4 h-4" aria-hidden />
+                    </span>
+                    <span className="flex-1 min-w-0 truncate text-text-primary font-medium">{c.name}</span>
+                    <CategoryTypeBadge type={c.category_type} />
+                  </>
+                );
+              })() : (
+                <span className="text-text-muted">Select category</span>
+              )}
             </button>
           </div>
+          {categoryPickerOpen && (
+            <CategoryPickerModal
+              open={categoryPickerOpen}
+              onClose={() => setCategoryPickerOpen(false)}
+              categoryList={categoryList}
+              selectedId={categoryId}
+              onSelect={(id) => setCategoryId(id == null ? '' : String(id))}
+              onAddCustom={() => setShowAddCategory(true)}
+            />
+          )}
         </div>
       </div>
       {showAddCategory && (
         <>
-          <div className="flex gap-2 mt-2 mb-4">
+          <div className="flex flex-wrap gap-2 mt-2 mb-4 items-center">
             <input
               type="text"
               placeholder="New category name"
@@ -915,10 +1452,20 @@ function AddExpenseForm({ placeId, place, members, onSaved, onCancel, currency }
               onChange={(e) => setNewCategoryName(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && (e.preventDefault(), handleAddCategory(e))}
               disabled={addingCategory}
-              className="input input-bordered flex-1 min-h-[44px] text-base rounded-lg"
+              className="input input-bordered flex-1 min-w-[120px] min-h-[44px] text-base rounded-lg"
               autoFocus
               aria-label="New category name"
             />
+            <select
+              value={newCategoryType}
+              onChange={(e) => setNewCategoryType(e.target.value)}
+              className="select select-bordered min-h-[44px] text-base rounded-lg w-auto"
+              aria-label="Category type"
+            >
+              <option value="fixed">Fixed</option>
+              <option value="variable">Variable</option>
+              <option value="one_time">One-time</option>
+            </select>
             <button
               type="button"
               onClick={() => handleAddCategory()}
@@ -971,11 +1518,11 @@ function AddExpenseForm({ placeId, place, members, onSaved, onCancel, currency }
 
       <hr className="border-0 border-t border-base-300 my-5" aria-hidden />
 
-      <div className="flex flex-col-reverse sm:flex-row gap-3 sm:gap-4">
-        <button type="button" className="btn btn-ghost min-h-12 flex-1 order-2 sm:order-1" onClick={onCancel}>Cancel</button>
+      <div className="flex flex-col sm:flex-row gap-3 sm:gap-4">
         <button type="submit" className="btn btn-primary min-h-12 flex-1 order-1 sm:order-2 rounded-lg" disabled={saving}>
           {saving ? 'Adding…' : 'Add expense'}
         </button>
+        <button type="button" className="btn btn-ghost min-h-12 flex-1 order-2 sm:order-1 rounded-lg" onClick={onCancel}>Cancel</button>
       </div>
 
       <hr className="border-0 border-t border-base-300 mt-5 mb-0" aria-hidden />
@@ -1004,14 +1551,38 @@ function subDays(iso, days) {
   return d.toISOString().slice(0, 10);
 }
 
-function SummarySection({ data, period, setPeriod, summaryPeriodEnd, setSummaryPeriodEnd, members, currentUserId, currency }) {
+function SummarySection({
+  data,
+  period,
+  setPeriod,
+  summaryPeriodEnd,
+  setSummaryPeriodEnd,
+  cycleList = [],
+  currentCycle = null,
+  selectedCycleId = null,
+  setSelectedCycleId,
+  onResolveCycle,
+  onReopenCycle,
+  onStartNewCycle,
+  members: _members,
+  currentUserId,
+  currentUser,
+  currency,
+  placeId,
+  placeName,
+  isPlaceCreator = false,
+  onRefreshSummary,
+}) {
   const sym = currency?.symbol ?? '$';
   const netBalance = (data.total_owed_to_me ?? 0) - (data.total_i_owe ?? 0);
-  const periodLabel = period === 'fortnightly' ? 'Fortnight' : 'Week';
-  const rangeStr = formatPeriodRange(data.from, data.to);
+  const isCycleMode = data.cycle != null;
+  const periodLabel = isCycleMode ? 'Cycle' : (period === 'fortnightly' ? 'Fortnight' : 'Week');
+  const rangeStr = data.cycle?.name || formatPeriodRange(data.from, data.to);
   const today = new Date().toISOString().slice(0, 10);
-  const canGoNext = data.to && data.to < today;
+  const canGoNext = !isCycleMode && data.to && data.to < today;
   const periodDays = period === 'fortnightly' ? 14 : 7;
+  const selectedCycle = cycleList.find((c) => c.id === selectedCycleId);
+  const canResolve = selectedCycle?.status === 'open';
 
   const handlePrevPeriod = () => {
     if (!data.from) return;
@@ -1037,12 +1608,798 @@ function SummarySection({ data, period, setPeriod, summaryPeriodEnd, setSummaryP
   const totalOwedToMe = data.total_owed_to_me ?? 0;
   const [contributionExpanded, setContributionExpanded] = useState(false);
   const whoOwesMe = memberList.filter((m) => m.balance < 0);
+  const [requestingUserId, setRequestingUserId] = useState(null);
+  const [_requestErrors, setRequestErrors] = useState({});
+  const [globalRequestError, setGlobalRequestError] = useState('');
+  const [showStartCycleConfirm, setShowStartCycleConfirm] = useState(false);
+  const [startCycleLoading, setStartCycleLoading] = useState(false);
+  const [startCycleError, setStartCycleError] = useState('');
+  const [showResolveCycleConfirm, setShowResolveCycleConfirm] = useState(false);
+  const [showReopenCycleConfirm, setShowReopenCycleConfirm] = useState(false);
+  const [showSettleModal, setShowSettleModal] = useState(false);
+  const [settleTarget, setSettleTarget] = useState(null); // optional: pre-selected recipient (from "Settle" button)
+  const [settleFromUserId, setSettleFromUserId] = useState(''); // payer; defaults to current user
+  const [settleToUserId, setSettleToUserId] = useState(''); // recipient
+  const [settlePayerOpen, setSettlePayerOpen] = useState(false);
+  const [settlePayerQuery, setSettlePayerQuery] = useState('');
+  const [settleRecipientOpen, setSettleRecipientOpen] = useState(false);
+  const [settleRecipientQuery, setSettleRecipientQuery] = useState('');
+  const [settleAmount, setSettleAmount] = useState('');
+  const [settleDate, setSettleDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [settleNote, setSettleNote] = useState('');
+  const [settleLoading, setSettleLoading] = useState(false);
+  const [settleError, setSettleError] = useState('');
+  const [settlementList, setSettlementList] = useState([]);
+
+  const currentCycleName = selectedCycle?.name || (selectedCycle ? formatPeriodRange(selectedCycle.start_date, selectedCycle.end_date) : '');
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const nextCycleStart = selectedCycle?.end_date ? addDays(selectedCycle.end_date, 1) : null;
+  const _nextCycleEnd = nextCycleStart ? addDays(nextCycleStart, 13) : null;
+  const nextCycleIsFuture = nextCycleStart && nextCycleStart > todayIso;
+  const effectiveNextStart = nextCycleIsFuture ? todayIso : nextCycleStart;
+  const effectiveNextEnd = effectiveNextStart ? addDays(effectiveNextStart, 13) : null;
+  const nextCycleRangeStr = effectiveNextStart && effectiveNextEnd
+    ? formatPeriodRange(effectiveNextStart, effectiveNextEnd)
+    : '';
+  const nextCycleNote = nextCycleIsFuture
+    ? 'Current cycle hasn\'t ended yet. New cycle will start from today.'
+    : null;
+  const balanceStatus =
+    netBalance > 0 ? `You're owed ${sym}${Math.abs(netBalance).toFixed(2)}` :
+    netBalance < 0 ? `You owe ${sym}${Math.abs(netBalance).toFixed(2)}` :
+    'You are settled';
+
+  useEffect(() => {
+    if (!globalRequestError) return;
+    const t = setTimeout(() => setGlobalRequestError(''), 3000);
+    return () => clearTimeout(t);
+  }, [globalRequestError]);
+
+  useEffect(() => {
+    if (!placeId) return;
+    settlementsApi(placeId)
+      .list()
+      .then((res) => setSettlementList(res.results ?? []))
+      .catch(() => setSettlementList([]));
+  }, [placeId]);
+
+  async function handleRequestPayment(userId) {
+    if (!placeId || !userId) return;
+    setRequestErrors((prev) => ({ ...prev, [userId]: '' }));
+    setRequestingUserId(userId);
+    try {
+      await placesApi.requestPayment(placeId, userId);
+    } catch (err) {
+      const msg =
+        err?.error ||
+        err?.detail ||
+        (Array.isArray(err?.detail) ? err.detail[0] : '') ||
+        err?.message ||
+        'Failed to send payment request';
+      setRequestErrors((prev) => ({ ...prev, [userId]: msg }));
+      setGlobalRequestError(msg);
+    } finally {
+      setRequestingUserId(null);
+    }
+  }
+
+  function openSettleModal(member) {
+    const absBal = Math.abs(member.balance);
+    const memberOwesMe = member.balance < 0;
+    setSettleTarget(member);
+    setSettleFromUserId(memberOwesMe ? String(member.user_id ?? '') : String(currentUserId ?? ''));
+    setSettleToUserId(memberOwesMe ? String(currentUserId ?? '') : String(member.user_id ?? ''));
+    setSettlePayerOpen(false);
+    setSettlePayerQuery('');
+    setSettleRecipientOpen(false);
+    setSettleRecipientQuery('');
+    setSettleAmount(String(absBal.toFixed(2)));
+    setSettleDate(todayIso);
+    setSettleNote('');
+    setSettleError('');
+    setShowSettleModal(true);
+  }
+
+  function openNewPaymentModal() {
+    setSettleTarget(null);
+    setSettleFromUserId(String(currentUserId ?? ''));
+    setSettleToUserId('');
+    setSettlePayerOpen(false);
+    setSettlePayerQuery('');
+    setSettleRecipientOpen(false);
+    setSettleRecipientQuery('');
+    setSettleAmount('');
+    setSettleDate(todayIso);
+    setSettleNote('');
+    setSettleError('');
+    setShowSettleModal(true);
+  }
+
+  function closeSettleModal() {
+    if (settleLoading) return;
+    setShowSettleModal(false);
+    setSettleTarget(null);
+    setSettleFromUserId('');
+    setSettleToUserId('');
+    setSettlePayerOpen(false);
+    setSettleRecipientOpen(false);
+    setSettleRecipientQuery('');
+    setSettleError('');
+  }
+
+  async function handleSettleConfirm() {
+    if (!placeId) return;
+    const fromUserId = settleFromUserId ? Number(settleFromUserId) : currentUserId;
+    const toUserId = settleTarget?.user_id ?? (settleToUserId ? Number(settleToUserId) : null);
+    if (!fromUserId) {
+      setSettleError('Select a payer');
+      return;
+    }
+    if (!toUserId) {
+      setSettleError('Select a recipient');
+      return;
+    }
+    if (fromUserId === toUserId) {
+      setSettleError('Payer and recipient must be different');
+      return;
+    }
+    const amount = parseFloat(settleAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setSettleError('Enter a valid amount');
+      return;
+    }
+    setSettleError('');
+    setSettleLoading(true);
+    try {
+      await settlementCreate({
+        place_id: placeId,
+        from_user_id: fromUserId,
+        to_user_id: toUserId,
+        amount,
+        date: settleDate,
+        note: settleNote.trim() || undefined,
+      });
+      closeSettleModal();
+      if (onRefreshSummary) onRefreshSummary();
+      settlementsApi(placeId).list().then((res) => setSettlementList(res.results ?? []));
+    } catch (err) {
+      const msg = err?.error ?? err?.detail ?? (Array.isArray(err?.detail) ? err.detail[0] : '') ?? err?.message ?? 'Failed to record settlement';
+      setSettleError(msg);
+    } finally {
+      setSettleLoading(false);
+    }
+  }
 
   return (
     <section
       className="rounded-2xl border border-base-300 p-5 sm:p-6 bg-gradient-to-br from-base-100 via-base-100 to-base-200/50 shadow-[0_2px_12px_rgba(0,0,0,0.06)]"
     >
       <h2 className="text-lg font-semibold text-base-content m-0 mb-5">Financial summary</h2>
+
+      {/* Cycles: start first cycle or cycle selector + resolve / start new */}
+      {cycleList.length === 0 && (
+        <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 mb-6">
+          <p className="text-sm text-base-content/80 m-0 mb-3">Track expenses by cycle (e.g. fortnightly or monthly). Resolve when you settle up, then start a new cycle.</p>
+          {isPlaceCreator && (
+            <button type="button" className="btn btn-primary min-h-11 rounded-lg shadow-soft px-4" onClick={() => onStartNewCycle?.()}>
+              Start your first cycle
+            </button>
+          )}
+          {!isPlaceCreator && (
+            <p className="text-sm text-base-content/60 m-0">Only the person who created this place can start the first cycle.</p>
+          )}
+        </div>
+      )}
+      {cycleList.length > 0 && (
+        <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center gap-3 mb-6">
+          <div className="flex flex-col sm:flex-row sm:items-center gap-2 min-w-0">
+            <label htmlFor="summary-cycle" className="text-sm font-medium text-base-content/80 shrink-0">Cycle</label>
+            <select
+              id="summary-cycle"
+              className="select select-bordered w-full sm:max-w-xs min-h-11 rounded-lg border-base-300"
+              value={selectedCycleId ?? ''}
+              onChange={(e) => setSelectedCycleId?.(e.target.value ? Number(e.target.value) : null)}
+            >
+              {cycleList.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name || `${c.start_date} – ${c.end_date}`} {c.status === 'resolved' ? '(resolved)' : '(current)'}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {isPlaceCreator && canResolve && (
+              <button type="button" className="btn btn-outline min-h-11 rounded-lg border-base-300 flex-1 min-w-[calc(50%-4px)] sm:min-w-0 sm:flex-initial" onClick={() => setShowResolveCycleConfirm(true)}>
+                Resolve this cycle
+              </button>
+            )}
+            {isPlaceCreator && selectedCycle?.status === 'resolved' && (
+              <button type="button" className="btn btn-ghost min-h-11 rounded-lg flex-1 min-w-[calc(50%-4px)] sm:min-w-0 sm:flex-initial" onClick={() => setShowReopenCycleConfirm(true)} title="Make this cycle current again">
+                <RotateCcw className="h-4 w-4 mr-1 shrink-0" aria-hidden />
+                Reopen this cycle
+              </button>
+            )}
+            {isPlaceCreator && (
+              <button type="button" className="btn btn-primary min-h-11 rounded-lg shadow-soft px-4 flex-1 min-w-[calc(50%-4px)] sm:min-w-0 sm:flex-initial" onClick={() => { setStartCycleError(''); setShowStartCycleConfirm(true); }}>
+                Start new cycle
+              </button>
+            )}
+          </div>
+          {!isPlaceCreator && (
+            <p className="text-sm text-base-content/60 sm:w-full">Only the place creator can resolve or start a new cycle.</p>
+          )}
+        </div>
+      )}
+
+      {/* Start new cycle confirmation dialog */}
+      {showStartCycleConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="start-cycle-dialog-title"
+          onClick={() => setShowStartCycleConfirm(false)}
+        >
+          <div
+            className="bg-base-100 border border-base-300 rounded-2xl shadow-xl w-full max-w-md overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-6">
+              <div className="flex items-start gap-3 mb-4">
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary" aria-hidden>
+                  <PlayCircle className="h-6 w-6" />
+                </span>
+                <div>
+                  <h3 id="start-cycle-dialog-title" className="text-lg font-semibold text-base-content m-0">Start new cycle?</h3>
+                  <p className="text-sm text-base-content/70 m-0 mt-0.5">Begin a fresh tracking period</p>
+                </div>
+              </div>
+              <div className="space-y-4 text-sm">
+                <div className="flex gap-3 rounded-xl bg-base-200/80 p-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden>
+                    <CalendarRange className="h-4 w-4" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="font-medium text-base-content/80 m-0 mb-0.5">Current cycle</p>
+                    <p className="text-base-content font-medium m-0">{currentCycleName}</p>
+                    <p className="text-base-content/70 m-0 mt-1 flex items-center gap-1.5">
+                      <Scale className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                      Total: {sym}{totalExpense.toFixed(2)} · {balanceStatus}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex gap-3 rounded-xl bg-primary/5 border border-primary/20 p-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary" aria-hidden>
+                    <Calendar className="h-4 w-4" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="font-medium text-base-content/80 m-0 mb-0.5">New cycle</p>
+                    <p className="text-base-content font-medium m-0">{nextCycleRangeStr || 'Next 14 days from day after current cycle ends'}</p>
+                    {nextCycleNote && (
+                      <p className="text-warning text-xs m-0 mt-1 flex items-center gap-1">
+                        <Info className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                        {nextCycleNote}
+                      </p>
+                    )}
+                  </div>
+                </div>
+                {currentCycle && (
+                  <div className="flex gap-2 rounded-lg border border-base-300 bg-base-200/50 px-3 py-2.5">
+                    <Info className="h-4 w-4 shrink-0 text-primary/80 mt-0.5" aria-hidden />
+                    <p className="text-base-content/70 m-0 text-sm leading-snug">
+                      The current cycle will be closed. New expenses will be added to the new cycle.
+                    </p>
+                  </div>
+                )}
+                {startCycleError && (
+                  <div className="rounded-lg border border-error/30 bg-error/10 px-3 py-2.5 text-sm text-error">
+                    {startCycleError}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-3 p-4 border-t border-base-300 bg-base-200/50">
+              <button
+                type="button"
+                className="btn btn-ghost flex-1"
+                onClick={() => { setShowStartCycleConfirm(false); setStartCycleError(''); }}
+                disabled={startCycleLoading}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary flex-1"
+                disabled={startCycleLoading}
+                onClick={() => {
+                  setStartCycleError('');
+                  setStartCycleLoading(true);
+                  const p = onStartNewCycle?.();
+                  if (p && typeof p.then === 'function') {
+                    p.then(() => {
+                      setShowStartCycleConfirm(false);
+                    }).catch((err) => {
+                      let msg = err?.detail ?? err?.message;
+                      if (msg == null && typeof err === 'object' && !Array.isArray(err)) {
+                        const parts = [];
+                        for (const [k, v] of Object.entries(err)) {
+                          if (k === 'status') continue;
+                          const s = Array.isArray(v) ? v.join(' ') : String(v);
+                          if (s) parts.push(k === 'detail' ? s : `${k}: ${s}`);
+                        }
+                        msg = parts.length ? parts.join(' ') : null;
+                      }
+                      if (msg == null || msg === '') msg = 'Failed to start new cycle';
+                      setStartCycleError(Array.isArray(msg) ? msg[0] : msg);
+                    }).finally(() => setStartCycleLoading(false));
+                  } else {
+                    setShowStartCycleConfirm(false);
+                    setStartCycleLoading(false);
+                  }
+                }}
+              >
+                {startCycleLoading ? (
+                  <>
+                    <span className="loading loading-spinner loading-sm" aria-hidden />
+                    Starting…
+                  </>
+                ) : (
+                  <>
+                    <PlayCircle className="h-4 w-4 mr-1.5 shrink-0" aria-hidden />
+                    Start new cycle
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Resolve cycle confirmation dialog */}
+      {showResolveCycleConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="resolve-cycle-dialog-title"
+          onClick={() => setShowResolveCycleConfirm(false)}
+        >
+          <div
+            className="bg-base-100 border border-base-300 rounded-2xl shadow-xl w-full max-w-md overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-6">
+              <div className="flex items-start gap-3 mb-4">
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary" aria-hidden>
+                  <CheckCircle2 className="h-6 w-6" />
+                </span>
+                <div>
+                  <h3 id="resolve-cycle-dialog-title" className="text-lg font-semibold text-base-content m-0">Resolve this cycle?</h3>
+                  <p className="text-sm text-base-content/70 m-0 mt-0.5">Close this period and settle up</p>
+                </div>
+              </div>
+              <div className="space-y-4 text-sm">
+                <div className="flex gap-3 rounded-xl bg-base-200/80 p-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden>
+                    <CalendarRange className="h-4 w-4" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="font-medium text-base-content/80 m-0 mb-0.5">Cycle</p>
+                    <p className="text-base-content font-medium m-0">{currentCycleName}</p>
+                    <p className="text-base-content/70 m-0 mt-1 flex items-center gap-1.5">
+                      <Scale className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                      Total: {sym}{totalExpense.toFixed(2)} · {balanceStatus}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex gap-2 rounded-lg border border-base-300 bg-base-200/50 px-3 py-2.5">
+                  <Info className="h-4 w-4 shrink-0 text-primary/80 mt-0.5" aria-hidden />
+                  <p className="text-base-content/70 m-0 text-sm leading-snug">
+                    Resolving closes this cycle. You can still view it in the list, but no new expenses can be added to it. Start a new cycle to continue tracking.
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div className="flex gap-3 p-4 border-t border-base-300 bg-base-200/50">
+              <button
+                type="button"
+                className="btn btn-ghost flex-1"
+                onClick={() => setShowResolveCycleConfirm(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary flex-1"
+                onClick={() => {
+                  setShowResolveCycleConfirm(false);
+                  onResolveCycle?.(selectedCycleId);
+                }}
+              >
+                <Check className="h-4 w-4 mr-1.5 shrink-0" aria-hidden />
+                Resolve cycle
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Reopen cycle confirmation dialog (undo accidental resolve) */}
+      {showReopenCycleConfirm && selectedCycle && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="reopen-cycle-dialog-title"
+          onClick={() => setShowReopenCycleConfirm(false)}
+        >
+          <div
+            className="bg-base-100 border border-base-300 rounded-2xl shadow-xl w-full max-w-md overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-6">
+              <div className="flex items-start gap-3 mb-4">
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary" aria-hidden>
+                  <RotateCcw className="h-6 w-6" />
+                </span>
+                <div>
+                  <h3 id="reopen-cycle-dialog-title" className="text-lg font-semibold text-base-content m-0">Reopen this cycle?</h3>
+                  <p className="text-sm text-base-content/70 m-0 mt-0.5">Make it the current cycle again so you can add or edit expenses in this period</p>
+                </div>
+              </div>
+              <div className="space-y-4 text-sm">
+                <div className="flex gap-3 rounded-xl bg-base-200/80 p-3">
+                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden>
+                    <CalendarRange className="h-4 w-4" />
+                  </span>
+                  <div className="min-w-0">
+                    <p className="font-medium text-base-content/80 m-0 mb-0.5">Cycle</p>
+                    <p className="text-base-content font-medium m-0">{currentCycleName}</p>
+                  </div>
+                </div>
+                <div className="flex gap-2 rounded-lg border border-base-300 bg-base-200/50 px-3 py-2.5">
+                  <Info className="h-4 w-4 shrink-0 text-primary/80 mt-0.5" aria-hidden />
+                  <p className="text-base-content/70 m-0 text-sm leading-snug">
+                    {currentCycle
+                      ? 'The current cycle will be closed and this one will become active again. You can add or edit expenses in this period.'
+                      : 'This cycle will become the current one. Useful if you resolved by mistake—you can continue adding expenses to it.'}
+                  </p>
+                </div>
+              </div>
+            </div>
+            <div className="flex gap-3 p-4 border-t border-base-300 bg-base-200/50">
+              <button
+                type="button"
+                className="btn btn-ghost flex-1"
+                onClick={() => setShowReopenCycleConfirm(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary flex-1"
+                onClick={() => {
+                  setShowReopenCycleConfirm(false);
+                  onReopenCycle?.(selectedCycleId);
+                }}
+              >
+                <RotateCcw className="h-4 w-4 mr-1.5 shrink-0" aria-hidden />
+                Reopen cycle
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Settle / New payment modal */}
+      {showSettleModal && (
+        <>
+          <div
+            className="fixed inset-0 z-[220] bg-black/40"
+            aria-hidden
+            onClick={closeSettleModal}
+          />
+          <div className="fixed inset-0 z-[221] flex items-end sm:items-center justify-center p-0 sm:p-4 pointer-events-none">
+            {(() => {
+              const meAsMember = { user_id: currentUserId, display_name: currentUser?.display_name || currentUser?.username, username: currentUser?.username, profile_photo: currentUser?.profile_photo };
+              const payerOptions = memberList.some((m) => String(m.user_id) === String(currentUserId)) ? memberList : [meAsMember, ...memberList];
+              const recipientOptions = memberList.some((m) => String(m.user_id) === String(currentUserId)) ? memberList : [meAsMember, ...memberList];
+              const payerPicked = settleFromUserId ? payerOptions.find((m) => String(m.user_id) === String(settleFromUserId)) : meAsMember;
+              const recipientPicked = settleToUserId ? recipientOptions.find((m) => String(m.user_id) === String(settleToUserId)) : (settleTarget || null);
+              const payerName = payerPicked?.display_name || payerPicked?.username || (String(payerPicked?.user_id) === String(currentUserId) ? 'You' : '') || 'Payer…';
+              const recipientName = recipientPicked ? (recipientPicked.display_name || recipientPicked.username || (String(recipientPicked.user_id) === String(currentUserId) ? 'You' : '')) : '';
+              const payerPhoto = payerPicked?.profile_photo ?? currentUser?.profile_photo;
+              const recipientPhoto = recipientPicked?.profile_photo ?? (String(recipientPicked?.user_id) === String(currentUserId) ? currentUser?.profile_photo : null);
+              return (
+            <div
+              className="pointer-events-auto w-full sm:max-w-md max-h-[85vh] sm:max-h-[80vh] rounded-t-2xl sm:rounded-2xl border border-base-300 bg-surface shadow-card overflow-hidden flex flex-col"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="settle-dialog-title"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Mobile grab handle */}
+              <div className="sm:hidden pt-2 pb-1 flex justify-center" aria-hidden>
+                <div className="h-1 w-10 rounded-full bg-base-300" />
+              </div>
+              <div className="px-5 pt-5 pb-4 border-b border-border">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <h3 id="settle-dialog-title" className="text-lg font-semibold text-text-primary m-0">
+                      New payment
+                    </h3>
+                    <p className="text-sm text-text-muted m-0 mt-1">
+                      Record a payment within <span className="font-medium text-text-secondary">{placeName || 'this place'}</span>.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm btn-square rounded-lg"
+                    onClick={closeSettleModal}
+                    disabled={settleLoading}
+                    aria-label="Close"
+                  >
+                    <X className="w-4 h-4" aria-hidden />
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-5 space-y-5 overflow-y-auto flex-1 min-h-0">
+                {/* Payer / Recipient */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label htmlFor="settle-payer" className="block text-sm font-medium text-text-secondary mb-2">Payer</label>
+                    <div className="relative">
+                      <button
+                        id="settle-payer"
+                        type="button"
+                        className="w-full h-11 rounded-lg border border-base-300 bg-base-100 px-2 flex items-center gap-2.5 text-left transition-colors hover:bg-base-200 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                        onClick={() => { setSettleRecipientOpen(false); setSettlePayerOpen((v) => !v); }}
+                        disabled={settleLoading}
+                        aria-haspopup="listbox"
+                        aria-expanded={settlePayerOpen}
+                      >
+                        <Avatar username={payerName} photoUrl={payerPhoto} className="!w-7 !h-7  text-xs shrink-0" />
+                        <span className={`text-sm truncate flex-1 ${settleFromUserId ? 'text-text-secondary' : 'text-text-muted'}`}>
+                          {payerName}
+                        </span>
+                        <ChevronDown className="w-4 h-4 text-text-muted shrink-0" aria-hidden />
+                      </button>
+                      {settlePayerOpen && (
+                        <div className="absolute z-10 mt-2 w-full rounded-lg border border-base-300 bg-base-100 shadow-xl overflow-hidden">
+                          <div className="p-2 border-b border-base-300">
+                            <div className="relative">
+                              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" aria-hidden />
+                              <input
+                                type="search"
+                                value={settlePayerQuery}
+                                onChange={(e) => setSettlePayerQuery(e.target.value)}
+                                className="input input-bordered w-full min-h-10 rounded-lg border-base-300 pl-9 text-sm"
+                                placeholder="Search member…"
+                                autoFocus
+                              />
+                            </div>
+                          </div>
+                          <ul className="max-h-64 overflow-auto py-1" role="listbox" aria-label="Payers">
+                            {payerOptions
+                              .filter((m) => String(m.user_id) !== String(settleToUserId))
+                              .filter((m) => {
+                                const name = `${m.display_name || ''} ${m.username || ''}`.toLowerCase();
+                                return name.includes((settlePayerQuery || '').toLowerCase());
+                              })
+                              .map((m) => {
+                                const selected = String(m.user_id) === String(settleFromUserId);
+                                return (
+                                  <li key={m.user_id}>
+                                    <button
+                                      type="button"
+                                      className={`w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-base-200 transition-colors ${selected ? 'bg-primary/10' : ''}`}
+                                      onClick={() => {
+                                        setSettleFromUserId(String(m.user_id));
+                                        setSettlePayerOpen(false);
+                                        setSettlePayerQuery('');
+                                      }}
+                                    >
+                                      <Avatar username={m.display_name || m.username} photoUrl={m.profile_photo} className="!w-9 !h-9 text-sm" />
+                                      <div className="min-w-0 flex-1">
+                                        <p className="m-0 text-sm font-medium text-text-primary truncate">{m.display_name || m.username}</p>
+                                        <p className="m-0 text-xs text-text-muted">Group member</p>
+                                      </div>
+                                      {selected && <Check className="w-4 h-4 text-primary shrink-0" aria-hidden />}
+                                    </button>
+                                  </li>
+                                );
+                              })}
+                            {payerOptions.filter((m) => String(m.user_id) !== String(settleToUserId)).filter((m) => {
+                              const name = `${m.display_name || ''} ${m.username || ''}`.toLowerCase();
+                              return name.includes((settlePayerQuery || '').toLowerCase());
+                            }).length === 0 && (
+                              <li className="px-3 py-3 text-sm text-text-muted">No matches</li>
+                            )}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div>
+                    <label htmlFor="settle-recipient" className="block text-sm font-medium text-text-secondary mb-2">Recipient</label>
+                    <div className="relative">
+                      <button
+                        id="settle-recipient"
+                        type="button"
+                        className="w-full h-11 rounded-lg border border-base-300 bg-base-100 px-2 flex items-center gap-2.5 text-left transition-colors hover:bg-base-200 focus:outline-none focus:ring-2 focus:ring-primary/20"
+                        onClick={() => { setSettlePayerOpen(false); setSettleRecipientOpen((v) => !v); }}
+                        disabled={settleLoading}
+                        aria-haspopup="listbox"
+                        aria-expanded={settleRecipientOpen}
+                      >
+                        {recipientPicked ? (
+                          <Avatar username={recipientName} photoUrl={recipientPhoto} className="!w-7 !h-7 text-xs shrink-0" />
+                        ) : (
+                          <Search className="w-4 h-4 text-text-muted shrink-0" aria-hidden />
+                        )}
+                        <span className={`text-sm truncate flex-1 ${recipientPicked ? 'text-text-secondary' : 'text-text-muted'}`}>
+                          {recipientPicked ? recipientName : 'Recipient…'}
+                        </span>
+                        <ChevronDown className="w-4 h-4 text-text-muted shrink-0" aria-hidden />
+                      </button>
+
+                      {settleRecipientOpen && (
+                        <div className="absolute z-10 mt-2 w-full rounded-lg border border-base-300 bg-base-100 shadow-xl overflow-hidden">
+                          <div className="p-2 border-b border-base-300">
+                            <div className="relative">
+                              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-text-muted" aria-hidden />
+                              <input
+                                type="search"
+                                value={settleRecipientQuery}
+                                onChange={(e) => setSettleRecipientQuery(e.target.value)}
+                                className="input input-bordered w-full min-h-10 rounded-lg border-base-300 pl-9 text-sm"
+                                placeholder="Search member…"
+                                autoFocus
+                              />
+                            </div>
+                          </div>
+                          <ul className="max-h-64 overflow-auto py-1" role="listbox" aria-label="Recipients">
+                            {recipientOptions
+                              .filter((m) => String(m.user_id) !== String(settleFromUserId))
+                              .filter((m) => {
+                                const name = `${m.display_name || ''} ${m.username || ''}`.toLowerCase();
+                                return name.includes((settleRecipientQuery || '').toLowerCase());
+                              })
+                              .map((m) => {
+                                const selected = String(m.user_id) === String(settleToUserId);
+                                return (
+                                  <li key={m.user_id}>
+                                    <button
+                                      type="button"
+                                      className={`w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-base-200 transition-colors ${selected ? 'bg-primary/10' : ''}`}
+                                      onClick={() => {
+                                        setSettleTarget(null);
+                                        setSettleToUserId(String(m.user_id));
+                                        setSettleRecipientOpen(false);
+                                        setSettleRecipientQuery('');
+                                      }}
+                                    >
+                                      <Avatar username={m.display_name || m.username} photoUrl={m.profile_photo} className="!w-9 !h-9 text-sm" />
+                                      <div className="min-w-0 flex-1">
+                                        <p className="m-0 text-sm font-medium text-text-primary truncate">{m.display_name || m.username}</p>
+                                        <p className="m-0 text-xs text-text-muted">Group member</p>
+                                      </div>
+                                      {selected && <Check className="w-4 h-4 text-primary shrink-0" aria-hidden />}
+                                    </button>
+                                  </li>
+                                );
+                              })}
+                            {recipientOptions
+                              .filter((m) => String(m.user_id) !== String(settleFromUserId))
+                              .filter((m) => {
+                                const name = `${m.display_name || ''} ${m.username || ''}`.toLowerCase();
+                                return name.includes((settleRecipientQuery || '').toLowerCase());
+                              }).length === 0 && (
+                              <li className="px-3 py-3 text-sm text-text-muted">No matches</li>
+                            )}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Amount + Date */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label htmlFor="settle-amount" className="block text-sm font-medium text-text-secondary mb-2">
+                      Amount
+                    </label>
+                    <div className="flex items-center h-11 rounded-lg border border-base-300 bg-base-100 overflow-hidden focus-within:ring-2 focus-within:ring-primary/20 focus-within:border-primary">
+                      <span className="pl-3 text-text-muted font-medium tabular-nums shrink-0">{sym}</span>
+                      <input
+                        id="settle-amount"
+                        type="number"
+                        min="0.01"
+                        step="0.01"
+                        className="flex-1 min-w-0 border-0 bg-transparent py-2 px-3 text-base focus:outline-none h-full"
+                        value={settleAmount}
+                        onChange={(e) => setSettleAmount(e.target.value)}
+                        onWheel={(e) => e.target.blur()}
+                        disabled={settleLoading}
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label htmlFor="settle-date" className="block text-sm font-medium text-text-secondary mb-2">
+                      Date
+                    </label>
+                    <CallyDatePicker
+                      id="settle-date"
+                      value={settleDate}
+                      onChange={(e) => setSettleDate(e.target.value)}
+                      disabled={settleLoading}
+                      max={todayIso}
+                      inputClassName="input input-bordered w-full min-h-11 rounded-lg border-base-300 bg-base-100 pr-10 has-calendar-icon"
+                      ariaLabel="Settlement date"
+                    />
+                  </div>
+                </div>
+
+                {/* Within group (read-only context) */}
+                <div className="flex items-center justify-between gap-3 rounded-lg border border-base-300 bg-base-100 px-3 py-2">
+                  <span className="text-xs font-medium text-text-muted">Within group</span>
+                  <span className="inline-flex items-center gap-2 min-w-0">
+                    <Users className="w-4 h-4 text-text-muted shrink-0" aria-hidden />
+                    <span className="text-sm font-medium text-text-secondary truncate">{placeName || '—'}</span>
+                  </span>
+                </div>
+
+                <div>
+                  <label htmlFor="settle-note" className="block text-sm font-medium text-text-secondary mb-2">
+                    Note (optional)
+                  </label>
+                  <input
+                    id="settle-note"
+                    type="text"
+                    className="input input-bordered w-full min-h-11 rounded-lg border-base-300 bg-base-100"
+                    placeholder="e.g. Bank transfer"
+                    value={settleNote}
+                    onChange={(e) => setSettleNote(e.target.value)}
+                    disabled={settleLoading}
+                  />
+                </div>
+
+                {settleError && <p className="text-sm text-error m-0">{settleError}</p>}
+              </div>
+
+              <div className="p-4 pb-[calc(1rem+env(safe-area-inset-bottom))] border-t border-border bg-base-100/60 flex gap-3">
+                <button
+                  type="button"
+                  className="btn btn-outline min-h-11 rounded-lg border-base-300 flex-1"
+                  onClick={closeSettleModal}
+                  disabled={settleLoading}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary min-h-11 rounded-lg shadow-soft flex-1"
+                  disabled={settleLoading}
+                  onClick={handleSettleConfirm}
+                >
+                  {settleLoading ? (
+                    <>
+                      <span className="loading loading-spinner loading-sm" aria-hidden />
+                      Recording…
+                    </>
+                  ) : (
+                    'Save'
+                  )}
+                </button>
+              </div>
+            </div>
+              );
+            })()}
+          </div>
+        </>
+      )}
 
       {/* Three summary cards in one row */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
@@ -1157,39 +2514,40 @@ function SummarySection({ data, period, setPeriod, summaryPeriodEnd, setSummaryP
         </div>
       </div>
 
-      {/* Period selection: single row in light grey rounded container (reference) */}
-      <div className="rounded-xl bg-base-200/80 border border-base-300 px-4 py-3 mb-3">
-        <div className="flex flex-wrap items-center gap-3">
-          <span className="text-sm font-medium text-base-content">Period</span>
-          <select
-            value={period}
-            onChange={(e) => { setPeriod(e.target.value); setSummaryPeriodEnd(null); }}
-            className="flex-1 min-w-0 max-w-[280px] rounded-lg border border-base-300 bg-base-100 px-3 py-2 text-sm text-base-content focus:outline-none focus:ring-2 focus:ring-primary/30 appearance-none bg-no-repeat bg-[length:1rem_1rem] bg-[right_0.5rem_center] pr-9"
-            style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")` }}
-            aria-label="Period"
-          >
-            <option value="weekly">Week ({rangeStr})</option>
-            <option value="fortnightly">Fortnight ({rangeStr})</option>
-          </select>
-          <div className="flex items-center gap-0.5">
-            <button type="button" className="btn btn-ghost btn-sm btn-square text-base-content/70 hover:text-base-content hover:bg-base-300/50" onClick={handlePrevPeriod} aria-label="Previous period">
-              <ChevronLeft className="w-4 h-4" />
+      {/* Period selection (only when not using cycles) */}
+      {!isCycleMode && (
+        <div className="rounded-xl bg-base-200/80 border border-base-300 px-4 py-3 mb-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <span className="text-sm font-medium text-base-content">Period</span>
+            <select
+              value={period}
+              onChange={(e) => { setPeriod(e.target.value); setSummaryPeriodEnd(null); }}
+              className="flex-1 min-w-0 max-w-[280px] rounded-lg border border-base-300 bg-base-100 px-3 py-2 text-sm text-base-content focus:outline-none focus:ring-2 focus:ring-primary/30 appearance-none bg-no-repeat bg-[length:1rem_1rem] bg-[right_0.5rem_center] pr-9"
+              style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")` }}
+              aria-label="Period"
+            >
+              <option value="weekly">Week ({rangeStr})</option>
+              <option value="fortnightly">Fortnight ({rangeStr})</option>
+            </select>
+            <div className="flex items-center gap-0.5">
+              <button type="button" className="btn btn-ghost btn-sm btn-square text-base-content/70 hover:text-base-content hover:bg-base-300/50" onClick={handlePrevPeriod} aria-label="Previous period">
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+              <button type="button" className="btn btn-ghost btn-sm btn-square text-base-content/70 hover:text-base-content hover:bg-base-300/50 disabled:opacity-40" disabled={!canGoNext} onClick={handleNextPeriod} aria-label="Next period">
+                <ChevronRight className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="h-6 w-px bg-base-300 shrink-0" aria-hidden />
+            <button type="button" className="flex h-9 w-9 items-center justify-center rounded-lg border border-base-300 bg-base-100 text-base-content/70 hover:bg-base-200 hover:text-base-content" aria-label="Open calendar">
+              <Calendar className="w-4 h-4" />
             </button>
-            <button type="button" className="btn btn-ghost btn-sm btn-square text-base-content/70 hover:text-base-content hover:bg-base-300/50 disabled:opacity-40" disabled={!canGoNext} onClick={handleNextPeriod} aria-label="Next period">
-              <ChevronRight className="w-4 h-4" />
-            </button>
+            {summaryPeriodEnd && (
+              <button type="button" className="btn btn-ghost btn-sm ml-1 text-primary" onClick={handleResetPeriod}>Current period</button>
+            )}
           </div>
-          <div className="h-6 w-px bg-base-300 shrink-0" aria-hidden />
-          <button type="button" className="flex h-9 w-9 items-center justify-center rounded-lg border border-base-300 bg-base-100 text-base-content/70 hover:bg-base-200 hover:text-base-content" aria-label="Open calendar">
-            <Calendar className="w-4 h-4" />
-          </button>
-          {summaryPeriodEnd && (
-            <button type="button" className="btn btn-ghost btn-sm ml-1 text-primary" onClick={handleResetPeriod}>Current period</button>
-          )}
         </div>
-      </div>
+      )}
 
-      {/* Compared to last period: meaningful text + real percentage or amounts */}
       {data.from && (
         <div className="flex flex-wrap items-center gap-2 mb-6">
           {(() => {
@@ -1270,9 +2628,9 @@ function SummarySection({ data, period, setPeriod, summaryPeriodEnd, setSummaryP
             <h3 className="text-base font-semibold text-base-content m-0 mb-3">Expense breakdown</h3>
             <h4 className="text-sm font-medium text-base-content/70 m-0 mb-3">Share split</h4>
             {pieData.length > 0 ? (
-              <div className="flex flex-row items-center gap-4">
-                <div className="relative w-[200px] h-[200px] shrink-0 outline-none border-0 shadow-none [&_.recharts-responsive-container]:outline-none [&_.recharts-responsive-container]:border-0 [&_.recharts-responsive-container]:shadow-none">
-                  <ResponsiveContainer width="100%" height="100%" style={{ outline: 'none', border: 'none', boxShadow: 'none' }}>
+              <div className="flex flex-col items-center gap-4 lg:flex-row lg:items-center">
+                <div className="relative w-[200px] h-[200px] shrink-0 min-w-0 outline-none border-0 shadow-none mx-auto lg:mx-0 [&_.recharts-responsive-container]:outline-none [&_.recharts-responsive-container]:border-0 [&_.recharts-responsive-container]:shadow-none">
+                  <ResponsiveContainer width={200} height={200} style={{ outline: 'none', border: 'none', boxShadow: 'none' }}>
                     <PieChart style={{ outline: 'none', border: 'none', boxShadow: 'none' }}>
                       <Pie
                         data={pieData}
@@ -1295,17 +2653,21 @@ function SummarySection({ data, period, setPeriod, summaryPeriodEnd, setSummaryP
                     </span>
                   </div>
                 </div>
-                <div className="flex flex-col gap-2 min-w-0">
-                  <div className="flex items-center gap-2 text-sm">
+                <div className="flex flex-col gap-2 min-w-0 w-full lg:flex-1">
+                  <div className="flex items-center justify-center gap-2 text-sm flex-wrap lg:justify-start">
                     <span className="w-3 h-3 rounded-full bg-primary shrink-0" aria-hidden />
-                    <span className="text-base-content/80">{sym}{myShare.toFixed(2)}</span>
-                    <span className="text-base-content/60">Your share</span>
+                    <span className="text-base-content/80 tabular-nums shrink-0">{sym}{myShare.toFixed(2)}</span>
+                    <span className="text-base-content/60 min-w-0 break-words">Your share</span>
                   </div>
-                  <div className="flex items-center gap-2 text-sm">
-                    <span className="w-3 h-3 rounded-full bg-base-content/30 shrink-0" aria-hidden />
-                    <span className="text-base-content/80">{sym}{othersShare.toFixed(2)}</span>
-                    <span className="text-base-content/60">Others' share</span>
-                  </div>
+                  {othersShare > 0 ? (
+                    <div className="flex items-center justify-center gap-2 text-sm flex-wrap lg:justify-start">
+                      <span className="w-3 h-3 rounded-full bg-base-content/30 shrink-0" aria-hidden />
+                      <span className="text-base-content/80 tabular-nums shrink-0">{sym}{othersShare.toFixed(2)}</span>
+                      <span className="text-base-content/60 min-w-0 break-words">Others' share</span>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-base-content/50 m-0">No other shares in this period</p>
+                  )}
                 </div>
               </div>
             ) : (
@@ -1341,7 +2703,7 @@ function SummarySection({ data, period, setPeriod, summaryPeriodEnd, setSummaryP
                     >
                       <span className="flex min-w-0 flex-1 items-start gap-3">
                         <span className="relative shrink-0">
-                          <Avatar username={m.display_name || m.username} />
+                          <Avatar username={m.display_name || m.username} photoUrl={m.profile_photo} />
                           <span
                             className={`absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full border-2 border-base-100 text-white ${
                               owesMe ? 'bg-primary' : 'bg-base-content/60'
@@ -1382,17 +2744,30 @@ function SummarySection({ data, period, setPeriod, summaryPeriodEnd, setSummaryP
             <h3 className="text-base font-semibold text-base-content m-0 mb-3">Paid vs share</h3>
             {totalExpense > 0 ? (
               <>
-                <div className="h-[200px] w-full outline-none">
-                  <ResponsiveContainer width="100%" height="100%" style={{ outline: 'none' }}>
+                <div className="h-[200px] w-full min-w-0 outline-none">
+                  <ResponsiveContainer width="100%" height={200} style={{ outline: 'none' }}>
                     <BarChart data={[{ name: 'You', paid: totalIPaid, share: myShare }]} margin={{ top: 8, right: 8, left: 0, bottom: 8 }} style={{ outline: 'none' }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
                       <XAxis dataKey="name" tick={{ fontSize: 12, fill: '#64748b' }} />
                       <YAxis tick={{ fontSize: 11, fill: '#64748b' }} tickFormatter={(v) => sym + v} />
-                      <Tooltip formatter={(v) => [sym + Number(v).toFixed(2), '']} />
-                      <Bar dataKey="paid" name={`You ${sym}${totalIPaid.toFixed(0)}`} fill={CHART_COLORS.primaryLight} radius={[4, 4, 0, 0]} />
-                      <Bar dataKey="share" name={`Your share ${sym}${myShare.toFixed(2)}`} fill={CHART_COLORS.primary} radius={[4, 4, 0, 0]} />
+                      <Tooltip formatter={(value, name) => [sym + Number(value).toFixed(2), name === 'paid' ? 'Paid' : 'Your share']} />
+                      <Legend wrapperStyle={{ paddingTop: '8px' }} iconType="square" iconSize={10} />
+                      <Bar dataKey="paid" name="Paid" fill={CHART_COLORS.primaryLight} radius={[4, 4, 0, 0]} />
+                      <Bar dataKey="share" name="Your share" fill={CHART_COLORS.primary} radius={[4, 4, 0, 0]} />
                     </BarChart>
                   </ResponsiveContainer>
+                </div>
+                <div className="flex flex-wrap items-center gap-4 mt-3 text-sm">
+                  <span className="flex items-center gap-2">
+                    <span className="w-3 h-3 rounded-sm shrink-0" style={{ backgroundColor: CHART_COLORS.primaryLight }} aria-hidden />
+                    <span className="text-base-content/80 tabular-nums">{sym}{totalIPaid.toFixed(2)}</span>
+                    <span className="text-base-content/60">Paid</span>
+                  </span>
+                  <span className="flex items-center gap-2">
+                    <span className="w-3 h-3 rounded-sm shrink-0" style={{ backgroundColor: CHART_COLORS.primary }} aria-hidden />
+                    <span className="text-base-content/80 tabular-nums">{sym}{myShare.toFixed(2)}</span>
+                    <span className="text-base-content/60">Your share</span>
+                  </span>
                 </div>
                 <p className="text-sm text-base-content/60 mt-2">
                   {hasOverpay ? 'You covered more than your share this period.' : 'You paid your share or less this period.'}
@@ -1406,42 +2781,98 @@ function SummarySection({ data, period, setPeriod, summaryPeriodEnd, setSummaryP
           {/* Card 2: Member balances */}
           {memberList.length > 0 && (
             <div className="rounded-xl border border-base-300 p-4 bg-gradient-to-br from-base-100 to-base-200/80 shadow-[0_2px_10px_rgba(0,0,0,0.04)]">
-              <h3 className="text-base font-semibold text-base-content m-0 mb-3">Member balances</h3>
+              <div className="flex items-center justify-between gap-3 mb-3">
+                <h3 className="text-base font-semibold text-base-content m-0">Member balances</h3>
+                <button type="button" className="btn btn-outline min-h-11 rounded-lg border-base-300 gap-2 px-4" onClick={openNewPaymentModal}>
+                  <Plus className="w-4 h-4 shrink-0" aria-hidden />
+                  New payment
+                </button>
+              </div>
               <ul className="list-none p-0 m-0 space-y-4">
                 {memberList.map((m) => {
                   const owesMe = m.balance < 0;
                   const absBal = Math.abs(m.balance);
+                  const isRequesting = requestingUserId === m.user_id;
                   return (
-                    <li key={m.user_id} className="flex items-center justify-between gap-3 flex-wrap">
+                    <li key={m.user_id} className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
                       <span className="flex items-center gap-2">
-                        <Avatar username={m.display_name || m.username} />
+                        <Avatar username={m.display_name || m.username} photoUrl={m.profile_photo} />
                         <span className="font-medium text-base-content">{m.display_name || m.username}</span>
                       </span>
-                      <span className="font-medium text-base-content">{sym}{absBal.toFixed(2)}</span>
-                      <button
-                        type="button"
-                        className={`btn btn-sm ${owesMe ? 'btn-primary' : 'btn-ghost bg-base-300/60'}`}
-                      >
-                        {owesMe ? 'Request payment' : 'Mark as paid'}
-                      </button>
-                    </li>
+                      <div className="flex items-center gap-3 sm:justify-end">
+                        <span className="font-medium text-base-content tabular-nums">
+                          {sym}{absBal.toFixed(2)}
+                        </span>
+                        {absBal > 0 && (
+                          <button
+                            type="button"
+                            className={`btn min-h-11 rounded-lg gap-2 px-4 ${
+                              owesMe
+                                ? 'btn-primary shadow-soft'
+                                : 'btn-outline border-base-300'
+                            }`}
+                            disabled={owesMe ? isRequesting : false}
+                            onClick={() => owesMe ? handleRequestPayment(m.user_id) : openSettleModal(m)}
+                          >
+                            {owesMe ? (isRequesting ? 'Sending…' : 'Request payment') : 'Settle'}
+                          </button>
+                        )}
+                      </div>
+                  </li>
                   );
                 })}
               </ul>
+              {globalRequestError && (
+                <p className="mt-2 text-xs text-error m-0 sm:text-left">
+                  {globalRequestError}
+                </p>
+              )}
             </div>
           )}
         </div>
       </div>
+
+      {/* Settlement history */}
+      {settlementList.length > 0 && (
+        <div className="mt-6 rounded-xl border border-base-300 p-4 bg-gradient-to-br from-base-100 to-base-200/80 shadow-[0_2px_10px_rgba(0,0,0,0.04)]">
+          <h3 className="text-base font-semibold text-base-content m-0 mb-3">Settlement history</h3>
+          <p className="text-sm text-base-content/60 m-0 mb-3">Payments recorded in this place.</p>
+          <ul className="list-none p-0 m-0 space-y-2">
+            {settlementList.map((s) => (
+              <li key={s.id} className="flex flex-wrap items-center justify-between gap-2 py-2 border-b border-base-200 last:border-b-0 last:pb-0">
+                <span className="text-sm text-base-content">
+                  <span className="font-medium">{s.from_user_display_name || 'Someone'}</span>
+                  {' paid '}
+                  <span className="font-medium">{s.to_user_display_name || 'Someone'}</span>
+                  {' '}{sym}{Number(s.amount).toFixed(2)}
+                </span>
+                <span className="text-xs text-base-content/60">
+                  {s.date}
+                  {s.note ? ` · ${s.note}` : ''}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </section>
   );
 }
 
-function InviteSection({ placeId, placeName, inviteEmail, setInviteEmail, inviteList, onRefresh }) {
+function InviteSection({ placeId, placeName, inviteEmail, setInviteEmail, inviteList, onRefresh, members = [], currentUserId }) {
   const [sending, setSending] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState('');
   const [lastJoinLink, setLastJoinLink] = useState('');
   const [copied, setCopied] = useState(false);
+
+  const sortedMembers = Array.isArray(members)
+    ? [...members].sort((a, b) => {
+        if (a.role === 'owner' && b.role !== 'owner') return -1;
+        if (b.role === 'owner' && a.role !== 'owner') return 1;
+        return new Date(a.joined_at || 0) - new Date(b.joined_at || 0);
+      })
+    : [];
 
   async function handleInviteByEmail(e) {
     e.preventDefault();
@@ -1539,81 +2970,143 @@ function InviteSection({ placeId, placeName, inviteEmail, setInviteEmail, invite
   }
 
   return (
-    <section className="card bg-base-200 border border-base-300 rounded-xl p-5 mb-6">
-      <h2 className="text-lg font-semibold m-0 mb-2">Invite members</h2>
-      <p className="opacity-80 text-sm mb-4">Invite by email or share an invite link. Anyone with the link can join this place.</p>
+    <section className="card bg-base-200 border border-base-300 rounded-xl p-5 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-text-primary m-0 mb-2">Invite members</h2>
+      <p className="text-sm text-text-secondary m-0 mb-6">Invite by email or share an invite link. Anyone with the link can join this place.</p>
 
-      {/* Invite by email */}
-      <div className="mb-5">
-        <h3 className="text-sm font-medium opacity-80 m-0 mb-2">Invite by email</h3>
-        <form onSubmit={handleInviteByEmail} className="flex gap-2">
-          <input
-            type="email"
-            placeholder="Enter email"
-            value={inviteEmail}
-            onChange={(e) => setInviteEmail(e.target.value)}
-            disabled={sending}
-            className="input input-bordered flex-1"
-          />
-          <button
-            type="submit"
-            disabled={sending || !inviteEmail.trim()}
-            className="btn btn-primary"
-          >
-            {sending ? 'Sending…' : 'Send invite'}
-          </button>
-        </form>
-      </div>
-
-      {/* Share invite link */}
-      <div className="mb-5">
-        <h3 className="text-sm font-medium opacity-80 m-0 mb-2">Share invite link</h3>
-        <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={handleCopyLink}
-            disabled={generating}
-            className="btn btn-outline btn-sm"
-          >
-            {copied ? '✓ Copied!' : 'Copy link'}
-          </button>
-          <button
-            type="button"
-            onClick={handleShare}
-            disabled={generating}
-            className="btn btn-outline btn-sm"
-          >
-            Share…
-          </button>
-          <button
-            type="button"
-            onClick={handleGenerateLink}
-            disabled={generating}
-            className="btn btn-outline btn-sm"
-          >
-            {generating ? 'Generating…' : 'Generate new link'}
-          </button>
-        </div>
-        {lastJoinLink && (
-          <div className="mt-3 p-3 bg-base-100 rounded-lg">
-            <p className="m-0 text-xs opacity-70 mb-1">Current invite link:</p>
-            <code className="block break-all text-sm">{lastJoinLink}</code>
-          </div>
-        )}
-      </div>
-
-      {error && <div className="alert alert-error text-sm mb-3">{error}</div>}
-
-      {inviteList.length > 0 && (
+      <div className="space-y-6">
+        {/* Invite by email */}
         <div>
-          <h3 className="text-base font-semibold m-0 mb-2">Pending invites</h3>
-          <ul className="list-none p-0 m-0 text-sm opacity-80">
-            {inviteList.map((inv) => (
-              <li key={inv.id}>{inv.email || '(link invite)'} – {inv.status}</li>
-            ))}
-          </ul>
+          <h3 className="text-sm font-medium text-text-primary m-0 mb-2">Invite by email</h3>
+          <form onSubmit={handleInviteByEmail} className="flex flex-col sm:flex-row gap-3">
+            <input
+              type="email"
+              placeholder="Enter email"
+              value={inviteEmail}
+              onChange={(e) => setInviteEmail(e.target.value)}
+              disabled={sending}
+              className="input input-bordered w-full sm:flex-1 min-h-11 text-base rounded-lg border-base-300 bg-base-100 focus:ring-2 focus:ring-primary/20"
+            />
+            <button
+              type="submit"
+              disabled={sending || !inviteEmail.trim()}
+              className="btn btn-primary shrink-0 min-h-11 rounded-lg shadow-soft gap-2 px-4 sm:w-auto w-full"
+            >
+              {sending ? <Loader2 className="w-4 h-4 animate-spin shrink-0" aria-hidden /> : null}
+              {sending ? 'Sending…' : 'Send invite'}
+            </button>
+          </form>
         </div>
-      )}
+
+        {/* Share invite link */}
+        <div>
+          <h3 className="text-sm font-medium text-text-primary m-0 mb-3">Share invite link</h3>
+          <div className="flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={handleCopyLink}
+              disabled={generating}
+              className={`btn btn-outline min-h-11 rounded-lg border-base-300 gap-2 px-4 transition-all duration-300 ${
+                copied ? 'border-success bg-success/10 text-success' : ''
+              }`}
+            >
+              {copied ? (
+                <Check className="w-4 h-4 shrink-0" aria-hidden />
+              ) : (
+                <Copy className="w-4 h-4 shrink-0" aria-hidden />
+              )}
+              <span>{copied ? 'Copied!' : 'Copy link'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleShare}
+              disabled={generating}
+              className="btn btn-outline min-h-11 rounded-lg border-base-300 gap-2 px-4"
+            >
+              <Share2 className="w-4 h-4 shrink-0" aria-hidden />
+              Share…
+            </button>
+            <button
+              type="button"
+              onClick={handleGenerateLink}
+              disabled={generating}
+              className="btn btn-outline min-h-11 rounded-lg border-base-300 gap-2 px-4"
+            >
+              {generating ? (
+                <Loader2 className="w-4 h-4 shrink-0 animate-spin" aria-hidden />
+              ) : (
+                <RefreshCw className="w-4 h-4 shrink-0" aria-hidden />
+              )}
+              <span>{generating ? 'Generating…' : 'Generate new link'}</span>
+            </button>
+          </div>
+          {lastJoinLink && (
+            <div className="mt-4 p-4 bg-base-100 rounded-lg border border-base-300">
+              <p className="m-0 text-xs text-text-muted mb-2">Current invite link:</p>
+              <code className="block break-all text-sm text-text-secondary">{lastJoinLink}</code>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {error && <div className="alert alert-error text-sm rounded-lg">{error}</div>}
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6">
+        {/* Members list */}
+        <div>
+          <h3 className="text-sm font-semibold text-text-primary m-0 mb-3">Members</h3>
+          {sortedMembers.length === 0 ? (
+            <p className="text-sm text-text-secondary m-0">No members yet.</p>
+          ) : (
+            <ul className="list-none p-0 m-0 divide-y divide-base-300 rounded-lg border border-base-300 bg-base-100">
+              {sortedMembers.map((m) => {
+                const joinedLabel = m.joined_at ? new Date(m.joined_at).toLocaleDateString() : null;
+                const isYou = m.user?.id === currentUserId;
+                const roleLabel = m.role === 'owner' ? 'Owner' : 'Member';
+                const name = m.user?.display_name || m.user?.username || 'Member';
+                return (
+                  <li key={m.id ?? m.user?.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
+                    <span className="flex items-center gap-2 min-w-0">
+                      <Avatar username={name} photoUrl={m.user?.profile_photo} size="sm" />
+                      <span className="flex flex-col min-w-0">
+                        <span className="text-sm font-medium text-text-primary truncate">
+                          {name}{isYou ? ' (you)' : ''}
+                        </span>
+                        <span className="text-xs text-text-secondary">
+                          {roleLabel}{joinedLabel ? ` • Joined ${joinedLabel}` : ''}
+                        </span>
+                      </span>
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        {/* Pending invites */}
+        <div>
+          <h3 className="text-sm font-semibold text-text-primary m-0 mb-3">Pending invites</h3>
+          {inviteList.length === 0 ? (
+            <p className="text-sm text-text-secondary m-0">No pending invites.</p>
+          ) : (
+            <ul className="list-none p-0 m-0 divide-y divide-base-300 rounded-lg border border-base-300 bg-base-100 text-sm">
+              {inviteList.map((inv) => (
+                <li key={inv.id} className="px-3 py-2.5 flex items-center justify-between gap-3">
+                  <span className="flex flex-col min-w-0">
+                    <span className="font-medium text-text-primary truncate">
+                      {inv.email || 'Link invite'}
+                    </span>
+                    <span className="text-xs text-text-secondary">
+                      Status: {inv.status === 'pending' ? 'Pending' : inv.status}
+                    </span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
     </section>
   );
 }

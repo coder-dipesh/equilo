@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import Place, PlaceMember, ExpenseCategory, Expense, ExpenseSplit, PlaceInvite
+from .models import Place, PlaceMember, ExpenseCategory, Expense, ExpenseSplit, PlaceInvite, Notification
 
 
 @admin.register(Place)
@@ -32,3 +32,10 @@ class ExpenseAdmin(admin.ModelAdmin):
     list_display = ['description', 'amount', 'place', 'paid_by', 'date', 'category']
     list_filter = ['place', 'date']
     inlines = [ExpenseSplitInline]
+
+
+@admin.register(Notification)
+class NotificationAdmin(admin.ModelAdmin):
+    list_display = ['user', 'type', 'title', 'place', 'is_read', 'created_at']
+    list_filter = ['type', 'is_read', 'created_at']
+    search_fields = ['title', 'message', 'user__username', 'place__name']

@@ -86,21 +86,92 @@ class PlaceInvite(models.Model):
 
 class ExpenseCategory(models.Model):
     """Category for expenses (Rent, Utilities, Groceries, etc.) per Place."""
+    TYPE_FIXED = 'fixed'      # Predictable recurring (Rent, Internet)
+    TYPE_VARIABLE = 'variable'  # Changing costs (Groceries, Electricity)
+    TYPE_ONE_TIME = 'one_time'  # One-off (Bond, Furniture)
+    TYPE_CHOICES = [
+        (TYPE_FIXED, 'Fixed'),
+        (TYPE_VARIABLE, 'Variable'),
+        (TYPE_ONE_TIME, 'One-time'),
+    ]
+
     place = models.ForeignKey(Place, on_delete=models.CASCADE, related_name='categories')
     name = models.CharField(max_length=100)
+    category_type = models.CharField(
+        max_length=20,
+        choices=TYPE_CHOICES,
+        default=TYPE_VARIABLE,
+    )
 
     class Meta:
         unique_together = ['place', 'name']
         ordering = ['name']
         verbose_name_plural = 'Expense categories'
 
+    # Preset categories for new places: (name, category_type)
+    PRESETS = [
+        ('Rent', TYPE_FIXED),
+        ('Bond / Deposit', TYPE_ONE_TIME),
+        ('Strata / Building Fees', TYPE_FIXED),
+        ('Electricity', TYPE_VARIABLE),
+        ('Water', TYPE_VARIABLE),
+        ('Gas', TYPE_VARIABLE),
+        ('Internet', TYPE_FIXED),
+        ('Mobile (Shared Plan)', TYPE_FIXED),
+        ('Groceries', TYPE_VARIABLE),
+        ('Cleaning Supplies', TYPE_VARIABLE),
+        ('Toiletries', TYPE_VARIABLE),
+        ('Kitchen Supplies', TYPE_VARIABLE),
+        ('Household Items', TYPE_VARIABLE),
+        ('Netflix', TYPE_FIXED),
+        ('Spotify', TYPE_FIXED),
+        ('Amazon Prime', TYPE_FIXED),
+        ('Other Shared Subscriptions', TYPE_VARIABLE),
+        ('Takeaway', TYPE_VARIABLE),
+        ('Dining Out', TYPE_VARIABLE),
+        ('House Party', TYPE_VARIABLE),
+        ('Shared Events', TYPE_VARIABLE),
+        ('Other', TYPE_VARIABLE),
+    ]
+
     def __str__(self):
         return f"{self.name} ({self.place})"
 
 
+class ExpenseCycle(models.Model):
+    """
+    A settlement period for a Place (e.g. fortnight or month).
+    Expenses belong to a cycle; when resolved, the cycle is closed and a new one can start.
+    """
+    STATUS_OPEN = 'open'
+    STATUS_RESOLVED = 'resolved'
+    STATUS_CHOICES = [(STATUS_OPEN, 'Open'), (STATUS_RESOLVED, 'Resolved')]
+
+    place = models.ForeignKey(Place, on_delete=models.CASCADE, related_name='cycles')
+    start_date = models.DateField()
+    end_date = models.DateField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_OPEN)
+    name = models.CharField(max_length=100, blank=True)  # e.g. "Feb 2 – Feb 15"
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-start_date']
+        unique_together = ['place', 'start_date', 'end_date']
+
+    def __str__(self):
+        return f"{self.place.name}: {self.start_date}–{self.end_date} ({self.status})"
+
+
 class Expense(models.Model):
-    """A single expense in a Place. Split is defined via ExpenseSplit."""
+    """A single expense in a Place. Split is defined via ExpenseSplit. Optional cycle for period tracking."""
     place = models.ForeignKey(Place, on_delete=models.CASCADE, related_name='expenses')
+    cycle = models.ForeignKey(
+        'ExpenseCycle',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='expenses',
+    )
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     description = models.CharField(max_length=255)
     date = models.DateField()
@@ -149,3 +220,155 @@ class ExpenseSplit(models.Model):
 
     def __str__(self):
         return f"{self.expense} -> {self.user}"
+
+
+class Settlement(models.Model):
+    """
+    Records a payment from one member to another within a Place.
+    from_user paid to_user; this reduces the debt (balance moves toward 0).
+    """
+    place = models.ForeignKey(Place, on_delete=models.CASCADE, related_name='settlements')
+    from_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='settlements_made'
+    )
+    to_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='settlements_received'
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    date = models.DateField()  # when the payment happened (for period filtering)
+    note = models.CharField(max_length=500, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-date', '-created_at']
+
+    def __str__(self):
+        return f"{self.from_user} → {self.to_user} {self.amount} ({self.place})"
+
+
+class ActivityLog(models.Model):
+    """
+    Audit log of user actions for the Activity feed.
+    Types: expense_added, expense_edited, expense_deleted, place_created, place_joined,
+           settlement, profile_updated, password_changed.
+    """
+    TYPE_EXPENSE_ADDED = 'expense_added'
+    TYPE_EXPENSE_EDITED = 'expense_edited'
+    TYPE_EXPENSE_DELETED = 'expense_deleted'
+    TYPE_PLACE_CREATED = 'place_created'
+    TYPE_PLACE_JOINED = 'place_joined'
+    TYPE_SETTLEMENT = 'settlement'
+    TYPE_PROFILE_UPDATED = 'profile_updated'
+    TYPE_PASSWORD_CHANGED = 'password_changed'
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='activity_logs',
+    )
+    type = models.CharField(max_length=40, db_index=True)
+    place = models.ForeignKey(
+        Place,
+        on_delete=models.CASCADE,
+        related_name='activity_logs',
+        null=True,
+        blank=True,
+    )
+    expense = models.ForeignKey(
+        Expense,
+        on_delete=models.SET_NULL,
+        related_name='activity_logs',
+        null=True,
+        blank=True,
+    )
+    target_user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        related_name='activity_logs_targeted',
+        null=True,
+        blank=True,
+    )
+    amount = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    description = models.CharField(max_length=500, blank=True)
+    extra = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.user_id} {self.type} @ {self.created_at}"
+
+
+class Notification(models.Model):
+    """User-facing notifications shown in the navbar dropdown."""
+
+    TYPE_PAYMENT_REQUEST = 'payment_request'
+    TYPE_BALANCE_UPDATED = 'balance_updated'
+    TYPE_WELCOME = 'welcome'
+    TYPE_UNSETTLED_BALANCE = 'unsettled_balance'
+    TYPE_EXPENSE_ADDED = 'expense_added'
+
+    TYPE_CHOICES = [
+        (TYPE_PAYMENT_REQUEST, 'Payment Request'),
+        (TYPE_BALANCE_UPDATED, 'Balance Updated'),
+        (TYPE_WELCOME, 'Welcome'),
+        (TYPE_UNSETTLED_BALANCE, 'Unsettled Balance'),
+        (TYPE_EXPENSE_ADDED, 'Expense Added'),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='notifications',
+    )
+    place = models.ForeignKey(
+        Place,
+        on_delete=models.CASCADE,
+        related_name='notifications',
+        null=True,
+        blank=True,
+    )
+    type = models.CharField(max_length=40, choices=TYPE_CHOICES)
+    title = models.CharField(max_length=255)
+    message = models.TextField(blank=True)
+    # Optional extra structured data for deep links, amounts, etc.
+    data = models.JSONField(default=dict, blank=True)
+
+    is_read = models.BooleanField(default=False)
+    read_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.user}: {self.title}"
+
+
+class UserSession(models.Model):
+    """
+    Tracks active sessions (devices) per user. Created on login/register.
+    Used for "Active Sessions" in settings and "Log out from all devices".
+    """
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='user_sessions'
+    )
+    jti = models.CharField(max_length=255, unique=True, db_index=True)  # JWT ID from refresh token
+    refresh_token = models.TextField()  # Needed for blacklisting on revoke
+    device_label = models.CharField(max_length=255, blank=True)  # e.g. "Chrome on Mac", "iPhone"
+    user_agent = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()  # When the refresh token expires
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.user.username} @ {self.device_label or self.jti[:8]}"

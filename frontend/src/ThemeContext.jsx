@@ -1,28 +1,50 @@
 import { createContext, useContext, useEffect, useState } from 'react';
 
-const ThemeContext = createContext({ theme: 'dark', setTheme: () => {} });
+const ThemeContext = createContext({
+  theme: 'dark',
+  themePreference: 'dark',
+  setTheme: () => {},
+  resolvedTheme: 'dark',
+});
+
+function getSystemTheme() {
+  if (typeof window === 'undefined') return 'dark';
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
 
 export function ThemeProvider({ children }) {
-  const [theme, setThemeState] = useState(() => {
+  const [themePreference, setThemePreferenceState] = useState(() => {
     if (typeof window === 'undefined') return 'dark';
     const t = localStorage.getItem('theme');
-    if (t === 'light' || t === 'dark') return t;
-    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    if (t === 'light' || t === 'dark' || t === 'system') return t;
+    return 'system';
   });
+  const [systemTheme, setSystemTheme] = useState(getSystemTheme);
 
   useEffect(() => {
-    // Use DaisyUI theme "silk" for light mode (custom theme)
-    document.documentElement.setAttribute('data-theme', theme === 'light' ? 'silk' : 'dark');
-    localStorage.setItem('theme', theme);
-  }, [theme]);
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const handle = () => setSystemTheme(getSystemTheme());
+    mq.addEventListener('change', handle);
+    return () => mq.removeEventListener('change', handle);
+  }, []);
+
+  const resolvedTheme = themePreference === 'system' ? systemTheme : themePreference;
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', resolvedTheme === 'light' ? 'silk' : 'dark');
+  }, [resolvedTheme]);
+
+  useEffect(() => {
+    localStorage.setItem('theme', themePreference);
+  }, [themePreference]);
 
   const setTheme = (next) => {
-    const value = next === 'light' || next === 'dark' ? next : (theme === 'light' ? 'dark' : 'light');
-    setThemeState(value);
+    const value = next === 'light' || next === 'dark' || next === 'system' ? next : (themePreference === 'light' ? 'dark' : 'light');
+    setThemePreferenceState(value);
   };
 
   return (
-    <ThemeContext.Provider value={{ theme, setTheme }}>
+    <ThemeContext.Provider value={{ theme: resolvedTheme, themePreference, setTheme, resolvedTheme }}>
       {children}
     </ThemeContext.Provider>
   );

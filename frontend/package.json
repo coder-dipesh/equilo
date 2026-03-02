@@ -4,12 +4,15 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --host",
+    "dev:mobile": "sh -c 'IP=$(ipconfig getifaddr en0 2>/dev/null || true); [ -z \"$IP\" ] && IP=$(ipconfig getifaddr en1 2>/dev/null || true); [ -z \"$IP\" ] && IP=localhost; VITE_API_URL=\"http://$IP:8001/api\" vite --host'",
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
+    "cally": "^0.9.2",
+    "framer-motion": "^12.34.3",
     "lucide-react": "^0.563.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

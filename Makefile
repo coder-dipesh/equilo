@@ -1,7 +1,10 @@
-.PHONY: run check install
+.PHONY: run run-mobile check install
 
 run:
 	python3 manage.py runserver 8001
+
+run-mobile:
+	python3 manage.py runserver 0.0.0.0:8001
 
 check:
 	python3 manage.py check

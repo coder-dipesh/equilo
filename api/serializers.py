@@ -1,6 +1,6 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
-from .models import Place, PlaceMember, ExpenseCategory, Expense, ExpenseSplit, PlaceInvite, UserProfile
+from .models import Place, PlaceMember, ExpenseCategory, Expense, ExpenseSplit, PlaceInvite, UserProfile, Notification, ExpenseCycle, UserSession
 
 User = get_user_model()
 
@@ -56,15 +56,18 @@ class PlaceSerializer(serializers.ModelSerializer):
         user = self.context['request'].user
         place = Place.objects.create(created_by=user, **validated_data)
         PlaceMember.objects.create(place=place, user=user, role=PlaceMember.ROLE_OWNER)
-        for name in ['Rent', 'Utilities', 'Groceries', 'Internet', 'Other']:
-            ExpenseCategory.objects.get_or_create(place=place, defaults={'name': name})
+        for name, cat_type in ExpenseCategory.PRESETS:
+            ExpenseCategory.objects.get_or_create(
+                place=place, name=name,
+                defaults={'name': name, 'category_type': cat_type}
+            )
         return place
 
 
 class ExpenseCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = ExpenseCategory
-        fields = ['id', 'name']
+        fields = ['id', 'name', 'category_type']
 
     def create(self, validated_data):
         # place is passed from view perform_create via save(place=place)
@@ -74,7 +77,14 @@ class ExpenseCategorySerializer(serializers.ModelSerializer):
         name = (validated_data.get('name') or '').strip()
         if not name:
             raise serializers.ValidationError({'name': 'Category name is required.'})
-        category, _ = ExpenseCategory.objects.get_or_create(place=place, name=name, defaults={'name': name})
+        category_type = validated_data.get('category_type', ExpenseCategory.TYPE_VARIABLE)
+        category, _ = ExpenseCategory.objects.get_or_create(
+            place=place, name=name,
+            defaults={'name': name, 'category_type': category_type}
+        )
+        if not _:
+            category.category_type = category_type
+            category.save(update_fields=['category_type'])
         return category
 
 
@@ -84,6 +94,49 @@ class ExpenseSplitSerializer(serializers.ModelSerializer):
     class Meta:
         model = ExpenseSplit
         fields = ['id', 'user']
+
+
+class ExpenseCycleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ExpenseCycle
+        fields = ['id', 'place', 'start_date', 'end_date', 'status', 'name', 'created_at']
+        read_only_fields = ['place', 'status', 'created_at']
+        extra_kwargs = {'start_date': {'required': False}, 'end_date': {'required': False}}
+
+    def create(self, validated_data):
+        from datetime import timedelta
+        from django.utils import timezone
+        validated_data.pop('place', None)  # avoid duplicate when view calls save(place=place)
+        place = self.context.get('place')
+        if not place:
+            raise serializers.ValidationError('Place is required')
+        start_date = validated_data.get('start_date')
+        end_date = validated_data.get('end_date')
+        if not start_date or not end_date:
+            today = timezone.now().date()
+            last = place.cycles.order_by('-start_date').first()
+            if last:
+                start_date = start_date or (last.end_date + timedelta(days=1))
+                end_date = end_date or (start_date + timedelta(days=13))
+            else:
+                start_date = start_date or today
+                end_date = end_date or (start_date + timedelta(days=13))
+            # Do not allow cycles to start in the future: cap to today
+            if start_date > today:
+                start_date = today
+                end_date = start_date + timedelta(days=13)
+            validated_data['start_date'] = start_date
+            validated_data['end_date'] = end_date
+        name = validated_data.get('name') or f"{start_date.strftime('%b %d')} – {end_date.strftime('%b %d')}"
+        validated_data['name'] = name
+        # Avoid duplicate key error if the same period was already created (e.g. user retried)
+        cycle, created = ExpenseCycle.objects.get_or_create(
+            place=place,
+            start_date=start_date,
+            end_date=end_date,
+            defaults={'name': name, 'status': ExpenseCycle.STATUS_OPEN},
+        )
+        return cycle
 
 
 class ExpenseCategoryField(serializers.PrimaryKeyRelatedField):
@@ -122,6 +175,7 @@ class ExpenseSerializer(serializers.ModelSerializer):
     paid_by = UserSerializer(read_only=True)
     added_by = UserSerializer(read_only=True)
     category = ExpenseCategoryField()
+    cycle = ExpenseCycleSerializer(read_only=True)
     splits = ExpenseSplitSerializer(many=True, read_only=True)
     split_user_ids = serializers.ListField(
         child=serializers.IntegerField(),
@@ -132,11 +186,11 @@ class ExpenseSerializer(serializers.ModelSerializer):
     class Meta:
         model = Expense
         fields = [
-            'id', 'place', 'amount', 'description', 'date',
+            'id', 'place', 'cycle', 'amount', 'description', 'date',
             'paid_by', 'added_by', 'category', 'created_at',
             'splits', 'split_user_ids'
         ]
-        read_only_fields = ['created_at', 'place', 'added_by']
+        read_only_fields = ['created_at', 'place', 'added_by', 'cycle']
 
     def create(self, validated_data):
         split_user_ids = validated_data.pop('split_user_ids', [])
@@ -144,6 +198,7 @@ class ExpenseSerializer(serializers.ModelSerializer):
         place = validated_data.pop('place', None) or self.context.get('place')
         if not place or not place.members.filter(user=user).exists():
             raise serializers.ValidationError('You are not a member of this place.')
+        current_cycle = self.context.get('current_cycle')
         paid_by = validated_data.pop('paid_by', None)
         paid_by_id = getattr(paid_by, 'id', paid_by) if paid_by is not None else None
         if not paid_by_id or not place.members.filter(user_id=paid_by_id).exists():
@@ -152,6 +207,7 @@ class ExpenseSerializer(serializers.ModelSerializer):
             paid_by = User.objects.get(pk=paid_by)
         expense = Expense.objects.create(
             place=place,
+            cycle=current_cycle,
             paid_by=paid_by,
             added_by=user,
             amount=validated_data.get('amount'),
@@ -190,3 +246,42 @@ class PlaceInviteSerializer(serializers.ModelSerializer):
         model = PlaceInvite
         fields = ['id', 'place', 'email', 'token', 'invited_by', 'status', 'created_at']
         read_only_fields = ['place', 'invited_by', 'status', 'token']
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    place_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Notification
+        fields = [
+            'id',
+            'type',
+            'title',
+            'message',
+            'data',
+            'place',
+            'place_name',
+            'is_read',
+            'read_at',
+            'created_at',
+        ]
+        read_only_fields = fields
+
+    def get_place_name(self, obj):
+        try:
+            return obj.place.name if obj.place else None
+        except Exception:
+            return None
+
+
+class UserSessionSerializer(serializers.ModelSerializer):
+    is_current = serializers.SerializerMethodField()
+
+    class Meta:
+        model = UserSession
+        fields = ['id', 'jti', 'device_label', 'created_at', 'is_current']
+        read_only_fields = ['id', 'jti', 'device_label', 'created_at']
+
+    def get_is_current(self, obj):
+        current_jti = self.context.get('current_jti')
+        return current_jti is not None and obj.jti == current_jti

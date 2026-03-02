@@ -17,7 +17,7 @@ SECRET_KEY = os.environ.get(
 
 DEBUG = os.environ.get('DEBUG', 'True').lower() == 'true'
 
-# Vercel domains + localhost for development
+# Vercel domains + localhost for development (avoid '*' in production - set DEBUG=False)
 ALLOWED_HOSTS = [
     '127.0.0.1',
     'localhost',
@@ -26,6 +26,18 @@ ALLOWED_HOSTS = [
 # Add custom domain if set
 if os.environ.get('VERCEL_URL'):
     ALLOWED_HOSTS.append(f".{os.environ.get('VERCEL_URL')}")
+
+# Add LAN IP for mobile dev (phone on same WiFi)
+if DEBUG:
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        _lan_ip = s.getsockname()[0]
+        s.close()
+        ALLOWED_HOSTS.append(_lan_ip)
+    except Exception:
+        pass
 
 # Application definition
 INSTALLED_APPS = [
@@ -38,6 +50,7 @@ INSTALLED_APPS = [
     # Third party
     'rest_framework',
     'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
     'django_filters',
     'corsheaders',
     # Local apps
