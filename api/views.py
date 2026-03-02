@@ -1,9 +1,11 @@
 import hashlib
+import io
 import secrets
 from datetime import date, timedelta, timezone as dt_utc
 from decimal import Decimal
 
 from django.conf import settings as django_settings
+from django.core.files.uploadedfile import InMemoryUploadedFile
 from django.contrib.auth import get_user_model
 from django.db.models import Q, Sum
 from django.utils import timezone
@@ -47,6 +49,28 @@ def _safe_display_name(u):
         profile = None
     name = (getattr(profile, 'display_name', None) or '').strip() if profile else ''
     return name or getattr(u, 'username', '') or ''
+
+
+def _compress_profile_photo(uploaded_file):
+    """Resize and compress image for profile photo. Max 512px, JPEG quality 85. Returns file-like or None on error."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return uploaded_file
+    try:
+        img = Image.open(uploaded_file).convert('RGB')
+    except Exception:
+        return uploaded_file
+    max_size = 512
+    w, h = img.size
+    if w > max_size or h > max_size:
+        img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+    buf = io.BytesIO()
+    img.save(buf, format='JPEG', quality=85, optimize=True)
+    buf.seek(0)
+    data = buf.getvalue()
+    name = (uploaded_file.name or 'photo.jpg').rsplit('.', 1)[0] + '.jpg'
+    return InMemoryUploadedFile(io.BytesIO(data), 'profile_photo', name, 'image/jpeg', len(data), None)
 
 
 def _log_activity(request, activity_type, place=None, expense=None, target_user=None, amount=None, description='', extra=None):
@@ -161,7 +185,8 @@ def me(request):
         if 'display_name' in data:
             profile.display_name = (data['display_name'] or '').strip()
         if 'profile_photo' in request.FILES:
-            profile.profile_photo = request.FILES['profile_photo']
+            photo_file = _compress_profile_photo(request.FILES['profile_photo'])
+            profile.profile_photo = photo_file
         elif request.data.get('remove_profile_photo') in (True, 'true', '1'):
             profile.profile_photo = None
         profile.save()
