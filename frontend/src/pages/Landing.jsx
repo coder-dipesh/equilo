@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 // eslint-disable-next-line no-unused-vars -- motion.span / motion.div used in JSX
 import { motion } from 'framer-motion';
 import { Users, Receipt, Building2, ArrowRight, CircleDollarSign, Scale, Wallet, CheckCircle2, BarChart3, Percent, History, Plus, Menu, X } from 'lucide-react';
+import appIconUrl from '../assets/logo/app_icon.svg';
 
 const WORD_STAGGER_S = 0.14;
 
@@ -52,7 +53,7 @@ export default function Landing() {
         <nav className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4 lg:px-10">
           {/* Left: logo */}
           <Link to="/" className="flex items-center gap-2">
-            <img src="../src/assets/logo/app_icon.svg" alt="Equilo" className="w-8 h-8" />
+            <img src={appIconUrl} alt="Equilo" className="w-8 h-8" />
             <span className="text-body-lg font-semibold tracking-tight text-text-primary leading-none">
               Equilo
             </span>
@@ -680,7 +681,7 @@ export default function Landing() {
           <div className="flex flex-col gap-10 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <Link to="/" className="inline-flex items-center gap-2">
-                <img src="../src/assets/logo/app_icon.svg" alt="Equilo" className="w-8 h-8" />
+                <img src={appIconUrl} alt="Equilo" className="w-8 h-8" />
                 <span className="text-body-lg font-semibold tracking-tight text-text-primary leading-none">
                   Equilo
                 </span>
