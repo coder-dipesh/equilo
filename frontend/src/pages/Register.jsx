@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { Eye, EyeOff, Lock, ArrowRight, ShieldCheck, Users, LayoutDashboard, AlertTriangle } from 'lucide-react';
 import { useAuth } from '../AuthContext';
+import appIconUrl from '../assets/logo/app_icon.svg';
 
 export default function Register() {
   const [username, setUsername] = useState('');
@@ -53,7 +54,7 @@ export default function Register() {
       <div className="hidden md:flex md:w-1/2 items-center justify-center px-10 lg:px-16 relative">
         <div className="relative max-w-md space-y-6">
           <Link to="/" className="inline-flex items-center gap-2 no-underline hover:opacity-90 transition-opacity">
-            <img src="../src/assets/logo/app_icon.svg" alt="Equilo" className="w-8 h-8" />
+            <img src={appIconUrl} alt="Equilo" className="w-8 h-8" />
             <span className="text-body-lg font-semibold tracking-tight text-text-primary leading-none">Equilo</span>
           </Link>
           <h1 className="text-h2 font-semibold text-text-primary leading-tight">
@@ -109,14 +110,14 @@ export default function Register() {
         <div className="w-full max-w-md">
           {/* Mobile logo / heading */}
           <Link to="/" className="mb-6 md:hidden flex items-center justify-center gap-2 no-underline hover:opacity-90 transition-opacity">
-            <img src="../src/assets/logo/app_icon.svg" alt="Equilo" className="w-8 h-8" />
+            <img src={appIconUrl} alt="Equilo" className="w-8 h-8" />
             <span className="text-body-lg font-semibold tracking-tight text-text-primary">Equilo</span>
           </Link>
 
           <div className="rounded-2xl border border-border bg-base-100/95 shadow-card px-6 py-8 md:px-8 md:py-9 backdrop-blur-sm animate-fade-in">
             <div className="text-center mb-7">
               <Link to="/" className="hidden md:inline-flex items-center gap-2 no-underline hover:opacity-90 transition-opacity">
-                <img src="../src/assets/logo/app_icon.svg" alt="Equilo" className="w-8 h-8" />
+                <img src={appIconUrl} alt="Equilo" className="w-8 h-8" />
                 <span className="text-body-lg font-semibold tracking-tight text-text-primary">Equilo</span>
               </Link>
               <p className="text-sm text-text-muted md:mt-2 mt-0 m-0">Create your account</p>
@@ -180,7 +181,7 @@ export default function Register() {
                     required
                     minLength={minLength}
                     autoComplete="new-password"
-                    placeholder="At least 10 characters"
+                    placeholder="At least 8 characters"
                     className={`input input-bordered w-full min-h-11 rounded-lg bg-base-100 pr-10 text-text-primary ${
                       isPasswordWeak ? 'border-error focus:outline-error' : 'border-base-300'
                     }`}
