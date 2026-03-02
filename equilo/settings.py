@@ -147,10 +147,15 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 # Media files (user uploads, e.g. profile photos)
 # In production: use Supabase Storage. In dev: local filesystem.
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '').strip()
-SUPABASE_KEY = os.environ.get('SUPABASE_SERVICE_KEY') or os.environ.get('SUPABASE_KEY', '').strip()
+SUPABASE_KEY = (
+    os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
+    or os.environ.get('SUPABASE_SERVICE_KEY')
+    or os.environ.get('SUPABASE_KEY', '')
+).strip()
 SUPABASE_MEDIA_BUCKET = os.environ.get('SUPABASE_MEDIA_BUCKET', 'media')
-# Ensure django-supabase-storage can read bucket name
+# Ensure django-supabase-storage can read these (it uses SUPABASE_KEY, SUPABASE_BUCKET_NAME)
 if SUPABASE_URL and SUPABASE_KEY:
+    os.environ['SUPABASE_KEY'] = SUPABASE_KEY
     os.environ.setdefault('SUPABASE_BUCKET_NAME', SUPABASE_MEDIA_BUCKET)
 
 if SUPABASE_URL and SUPABASE_KEY:
@@ -165,6 +170,13 @@ if SUPABASE_URL and SUPABASE_KEY:
     MEDIA_URL = f'{SUPABASE_URL.rstrip("/")}/storage/v1/object/public/{SUPABASE_MEDIA_BUCKET}/'
     MEDIA_ROOT = ''  # Not used when Supabase is backend
 else:
+    if os.environ.get('VERCEL'):
+        from django.core.exceptions import ImproperlyConfigured
+        raise ImproperlyConfigured(
+            'On Vercel, SUPABASE_URL and SUPABASE_SERVICE_KEY must be set for media (profile photos). '
+            'Vercel has a read-only filesystem. Add them in Vercel → Project Settings → Environment Variables. '
+            'Create a "media" bucket in Supabase Storage first.'
+        )
     MEDIA_URL = 'media/'
     MEDIA_ROOT = BASE_DIR / 'media'
 
