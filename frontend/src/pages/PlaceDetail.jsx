@@ -2972,32 +2972,9 @@ function InviteSection({ placeId, placeName, inviteEmail, setInviteEmail, invite
   return (
     <section className="card bg-base-200 border border-base-300 rounded-xl p-5 sm:p-6 mb-6">
       <h2 className="text-lg font-semibold text-text-primary m-0 mb-2">Invite members</h2>
-      <p className="text-sm text-text-secondary m-0 mb-6">Invite by email or share an invite link. Anyone with the link can join this place.</p>
+      <p className="text-sm text-text-secondary m-0 mb-6">Share an invite link. Anyone with the link can join this place.</p>
 
       <div className="space-y-6">
-        {/* Invite by email */}
-        <div>
-          <h3 className="text-sm font-medium text-text-primary m-0 mb-2">Invite by email</h3>
-          <form onSubmit={handleInviteByEmail} className="flex flex-col sm:flex-row gap-3">
-            <input
-              type="email"
-              placeholder="Enter email"
-              value={inviteEmail}
-              onChange={(e) => setInviteEmail(e.target.value)}
-              disabled={sending}
-              className="input input-bordered w-full sm:flex-1 min-h-11 text-base rounded-lg border-base-300 bg-base-100 focus:ring-2 focus:ring-primary/20"
-            />
-            <button
-              type="submit"
-              disabled={sending || !inviteEmail.trim()}
-              className="btn btn-primary shrink-0 min-h-11 rounded-lg shadow-soft gap-2 px-4 sm:w-auto w-full"
-            >
-              {sending ? <Loader2 className="w-4 h-4 animate-spin shrink-0" aria-hidden /> : null}
-              {sending ? 'Sending…' : 'Send invite'}
-            </button>
-          </form>
-        </div>
-
         {/* Share invite link */}
         <div>
           <h3 className="text-sm font-medium text-text-primary m-0 mb-3">Share invite link</h3>
