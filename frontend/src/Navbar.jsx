@@ -281,7 +281,8 @@ export default function Navbar() {
 
     const placeId = n?.data?.place_id || n?.place;
     if (placeId) {
-      navigate(`/places/${placeId}`);
+      const openSettlement = n?.data?.open_settlement === true;
+      navigate(openSettlement ? `/places/${placeId}?tab=summary&settle=1` : `/places/${placeId}`);
     }
     setNotifOpen(false);
   }

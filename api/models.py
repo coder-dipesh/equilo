@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.db import models
+from django.utils import timezone
 
 
 class UserProfile(models.Model):
@@ -140,19 +141,27 @@ class ExpenseCategory(models.Model):
 
 class ExpenseCycle(models.Model):
     """
-    A settlement period for a Place (e.g. fortnight or month).
-    Expenses belong to a cycle; when resolved, the cycle is closed and a new one can start.
+    A settlement period for a Place (e.g. fortnight).
+    OPEN = active, expenses can be added.
+    PENDING_SETTLEMENT = end date passed, no new expenses; members settle up.
+    RESOLVED = closed, moved to archive.
     """
     STATUS_OPEN = 'open'
+    STATUS_PENDING_SETTLEMENT = 'pending_settlement'
     STATUS_RESOLVED = 'resolved'
-    STATUS_CHOICES = [(STATUS_OPEN, 'Open'), (STATUS_RESOLVED, 'Resolved')]
+    STATUS_CHOICES = [
+        (STATUS_OPEN, 'Open'),
+        (STATUS_PENDING_SETTLEMENT, 'Pending settlement'),
+        (STATUS_RESOLVED, 'Resolved'),
+    ]
 
     place = models.ForeignKey(Place, on_delete=models.CASCADE, related_name='cycles')
     start_date = models.DateField()
     end_date = models.DateField()
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_OPEN)
+    status = models.CharField(max_length=24, choices=STATUS_CHOICES, default=STATUS_OPEN)
     name = models.CharField(max_length=100, blank=True)  # e.g. "Feb 2 – Feb 15"
     created_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)  # set when status becomes RESOLVED
 
     class Meta:
         ordering = ['-start_date']
@@ -226,8 +235,16 @@ class Settlement(models.Model):
     """
     Records a payment from one member to another within a Place.
     from_user paid to_user; this reduces the debt (balance moves toward 0).
+    cycle is set when the settlement is made against a specific cycle's balance.
     """
     place = models.ForeignKey(Place, on_delete=models.CASCADE, related_name='settlements')
+    cycle = models.ForeignKey(
+        'ExpenseCycle',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='settlements',
+    )
     from_user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
@@ -254,13 +271,15 @@ class ActivityLog(models.Model):
     """
     Audit log of user actions for the Activity feed.
     Types: expense_added, expense_edited, expense_deleted, place_created, place_joined,
-           settlement, profile_updated, password_changed.
+           member_removed, place_left, settlement, profile_updated, password_changed.
     """
     TYPE_EXPENSE_ADDED = 'expense_added'
     TYPE_EXPENSE_EDITED = 'expense_edited'
     TYPE_EXPENSE_DELETED = 'expense_deleted'
     TYPE_PLACE_CREATED = 'place_created'
     TYPE_PLACE_JOINED = 'place_joined'
+    TYPE_MEMBER_REMOVED = 'member_removed'
+    TYPE_PLACE_LEFT = 'place_left'
     TYPE_SETTLEMENT = 'settlement'
     TYPE_PROFILE_UPDATED = 'profile_updated'
     TYPE_PASSWORD_CHANGED = 'password_changed'
@@ -312,6 +331,7 @@ class Notification(models.Model):
     TYPE_WELCOME = 'welcome'
     TYPE_UNSETTLED_BALANCE = 'unsettled_balance'
     TYPE_EXPENSE_ADDED = 'expense_added'
+    TYPE_CYCLE_ENDED = 'cycle_ended'
 
     TYPE_CHOICES = [
         (TYPE_PAYMENT_REQUEST, 'Payment Request'),
@@ -319,6 +339,7 @@ class Notification(models.Model):
         (TYPE_WELCOME, 'Welcome'),
         (TYPE_UNSETTLED_BALANCE, 'Unsettled Balance'),
         (TYPE_EXPENSE_ADDED, 'Expense Added'),
+        (TYPE_CYCLE_ENDED, 'Cycle Ended'),
     ]
 
     user = models.ForeignKey(
@@ -353,19 +374,21 @@ class Notification(models.Model):
 class UserSession(models.Model):
     """
     Tracks active sessions (devices) per user. Created on login/register.
-    Used for "Active Sessions" in settings and "Log out from all devices".
+    Identified by refresh token jti (rotated on each refresh). Raw refresh is not stored.
     """
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name='user_sessions'
     )
-    jti = models.CharField(max_length=255, unique=True, db_index=True)  # JWT ID from refresh token
-    refresh_token = models.TextField()  # Needed for blacklisting on revoke
+    jti = models.CharField(max_length=255, unique=True, db_index=True)  # JWT ID from current refresh token
     device_label = models.CharField(max_length=255, blank=True)  # e.g. "Chrome on Mac", "iPhone"
     user_agent = models.TextField(blank=True)
+    device_type = models.CharField(max_length=32, blank=True)  # mobile, tablet, desktop, unknown
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
-    expires_at = models.DateTimeField()  # When the refresh token expires
+    last_used_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField()  # When the current refresh token expires
 
     class Meta:
         ordering = ['-created_at']

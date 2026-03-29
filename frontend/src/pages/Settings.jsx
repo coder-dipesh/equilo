@@ -4,7 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 import { usePreferences } from '../PreferencesContext';
 import { useTheme } from '../ThemeContext';
-import { auth as authApi, getJtiFromRefreshToken } from '../api';
+import { auth as authApi } from '../api';
 import {
   User,
   Lock,
@@ -133,23 +133,11 @@ export default function Settings() {
     if (activeSection !== 'security') return;
     setSessionsLoading(true);
     setSessionsError('');
-    const currentJti = getJtiFromRefreshToken();
-    const refresh = localStorage.getItem('refresh');
 
     async function load() {
-      // Always ensure current device is registered when opening this page
-      if (refresh) {
-        try {
-          await authApi.sessions.register(refresh);
-        } catch (err) {
-          const msg = err.detail || err.message || 'Could not register this device';
-          setSessionsError(msg);
-        }
-      }
       try {
-        const list = await authApi.sessions.list(currentJti);
+        const list = await authApi.sessions.list();
         setSessions(list);
-        if (list.length > 0) setSessionsError('');
       } catch (err) {
         setSessionsError(err.detail || err.message || 'Failed to load sessions');
         setSessions([]);
@@ -552,28 +540,28 @@ export default function Settings() {
                     <p className="text-sm text-text-secondary m-0">Loading sessions…</p>
                   ) : sessions.length === 0 ? (
                     <div>
-                      <p className="text-sm text-text-secondary m-0 mb-3">Sessions are added when you log in from a device. If this device is not listed, try the button below.</p>
+                      <p className="text-sm text-text-secondary m-0 mb-2">
+                        Sessions are recorded when you sign in. If this list stays empty, the secure refresh cookie is probably not reaching the API—same-origin requests in dev (frontend proxy to Django) or proper CORS and cookie settings in production fix that.
+                      </p>
                       <button
                         type="button"
-                        className="btn btn-primary btn-sm rounded-lg"
-                        disabled={registerLoading || !localStorage.getItem('refresh')}
+                        className="btn btn-ghost btn-sm rounded-lg"
+                        disabled={registerLoading}
                         onClick={async () => {
-                          const refresh = localStorage.getItem('refresh');
-                          if (!refresh) return;
                           setRegisterLoading(true);
                           setSessionsError('');
                           try {
-                            await authApi.sessions.register(refresh);
-                            const list = await authApi.sessions.list(getJtiFromRefreshToken());
+                            await authApi.sessions.register();
+                            const list = await authApi.sessions.list();
                             setSessions(list);
                           } catch (err) {
-                            setSessionsError(err.detail || err.message || 'Failed to register device');
+                            setSessionsError(err.detail || err.message || 'Could not sync session');
                           } finally {
                             setRegisterLoading(false);
                           }
                         }}
                       >
-                        {registerLoading ? 'Registering…' : 'Register this device'}
+                        {registerLoading ? 'Syncing…' : 'Retry session sync'}
                       </button>
                     </div>
                   ) : (
@@ -603,7 +591,12 @@ export default function Settings() {
                                 onClick={async () => {
                                   setRevokingSessionId(s.id);
                                   try {
-                                    await authApi.sessions.revoke(s.jti);
+                                    const res = await authApi.sessions.revoke(s.jti);
+                                    if (res.logout_required) {
+                                      await logout();
+                                      navigate('/login');
+                                      return;
+                                    }
                                     setSessions((prev) => prev.filter((x) => x.id !== s.id));
                                   } catch (err) {
                                     setSessionsError(err.detail || err.message || 'Failed to revoke');
@@ -626,11 +619,9 @@ export default function Settings() {
                       className="mt-3 text-sm text-primary hover:underline font-medium disabled:opacity-50"
                       disabled={revokeAllLoading}
                       onClick={async () => {
-                        const refresh = localStorage.getItem('refresh');
-                        if (!refresh) return;
                         setRevokeAllLoading(true);
                         try {
-                          await authApi.sessions.revokeAll(refresh);
+                          await authApi.sessions.revokeAll();
                           setSessions((prev) => prev.filter((s) => s.is_current));
                           setRevokeAllLoading(false);
                         } catch (err) {

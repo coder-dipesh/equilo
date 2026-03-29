@@ -99,9 +99,18 @@ class ExpenseSplitSerializer(serializers.ModelSerializer):
 class ExpenseCycleSerializer(serializers.ModelSerializer):
     class Meta:
         model = ExpenseCycle
-        fields = ['id', 'place', 'start_date', 'end_date', 'status', 'name', 'created_at']
-        read_only_fields = ['place', 'status', 'created_at']
+        fields = ['id', 'place', 'start_date', 'end_date', 'status', 'name', 'created_at', 'resolved_at']
+        read_only_fields = ['place', 'status', 'created_at', 'resolved_at']
         extra_kwargs = {'start_date': {'required': False}, 'end_date': {'required': False}}
+
+    def validate_start_date(self, value):
+        from django.utils import timezone
+        if value is None:
+            return value
+        today = timezone.now().date()
+        if value < today:
+            raise serializers.ValidationError('Start date cannot be before today.')
+        return value
 
     def create(self, validated_data):
         from datetime import timedelta
@@ -110,33 +119,45 @@ class ExpenseCycleSerializer(serializers.ModelSerializer):
         place = self.context.get('place')
         if not place:
             raise serializers.ValidationError('Place is required')
-        start_date = validated_data.get('start_date')
-        end_date = validated_data.get('end_date')
-        if not start_date or not end_date:
-            today = timezone.now().date()
-            last = place.cycles.order_by('-start_date').first()
-            if last:
-                start_date = start_date or (last.end_date + timedelta(days=1))
-                end_date = end_date or (start_date + timedelta(days=13))
-            else:
-                start_date = start_date or today
-                end_date = end_date or (start_date + timedelta(days=13))
-            # Do not allow cycles to start in the future: cap to today
-            if start_date > today:
-                start_date = today
+        today = timezone.now().date()
+        request_data = getattr(self.context.get('request'), 'data', None) or {}
+        user_chose_start_date = 'start_date' in request_data
+        # Use provided start_date or default to today; already validated >= today
+        start_date = validated_data.pop('start_date', None) or today
+        if start_date < today:
+            raise serializers.ValidationError('Start date cannot be before today.')
+        end_date = start_date + timedelta(days=13)  # 14-day period inclusive
+        existing = ExpenseCycle.objects.filter(
+            place=place, start_date=start_date, end_date=end_date
+        ).first()
+        if existing and existing.status == ExpenseCycle.STATUS_OPEN:
+            return existing
+        if existing:
+            # Period exists but is resolved (or pending_settlement): user can "start" it again by reopening
+            if user_chose_start_date and existing.status == ExpenseCycle.STATUS_RESOLVED:
+                existing.status = ExpenseCycle.STATUS_OPEN
+                existing.resolved_at = None
+                existing.save(update_fields=['status', 'resolved_at'])
+                return existing
+            if existing and user_chose_start_date:
+                raise serializers.ValidationError(
+                    'A cycle for this period already exists and is not yet resolved. Please resolve it first or choose a different start date.'
+                )
+            # No user choice: advance until we find a free slot
+            while ExpenseCycle.objects.filter(place=place, start_date=start_date, end_date=end_date).exists():
+                start_date = end_date + timedelta(days=1)
                 end_date = start_date + timedelta(days=13)
-            validated_data['start_date'] = start_date
-            validated_data['end_date'] = end_date
         name = validated_data.get('name') or f"{start_date.strftime('%b %d')} – {end_date.strftime('%b %d')}"
+        validated_data['start_date'] = start_date
+        validated_data['end_date'] = end_date
         validated_data['name'] = name
-        # Avoid duplicate key error if the same period was already created (e.g. user retried)
-        cycle, created = ExpenseCycle.objects.get_or_create(
+        return ExpenseCycle.objects.create(
             place=place,
             start_date=start_date,
             end_date=end_date,
-            defaults={'name': name, 'status': ExpenseCycle.STATUS_OPEN},
+            name=name,
+            status=ExpenseCycle.STATUS_OPEN,
         )
-        return cycle
 
 
 class ExpenseCategoryField(serializers.PrimaryKeyRelatedField):
@@ -279,9 +300,23 @@ class UserSessionSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = UserSession
-        fields = ['id', 'jti', 'device_label', 'created_at', 'is_current']
-        read_only_fields = ['id', 'jti', 'device_label', 'created_at']
+        fields = [
+            'id',
+            'jti',
+            'device_label',
+            'device_type',
+            'created_at',
+            'last_used_at',
+            'ip_address',
+            'user_agent',
+            'is_current',
+        ]
+        read_only_fields = fields
 
     def get_is_current(self, obj):
+        # Prefer refresh-cookie jti; fall back to access token `sid` when cookie is not sent (e.g. cross-origin).
+        current_sid = self.context.get('current_sid')
+        if current_sid is not None and obj.pk == current_sid:
+            return True
         current_jti = self.context.get('current_jti')
         return current_jti is not None and obj.jti == current_jti

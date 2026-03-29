@@ -3,6 +3,7 @@ import { AuthProvider, useAuth } from './AuthContext';
 import { ThemeProvider } from './ThemeContext';
 import { PreferencesProvider } from './PreferencesContext';
 import { Skeleton } from './components/Skeleton';
+import OfflineBanner from './components/OfflineBanner';
 import Navbar from './Navbar';
 import BottomNav from './BottomNav';
 import Login from './pages/Login';
@@ -179,14 +180,15 @@ function AppRoutes() {
 
 export default function App() {
   return (
-    <ThemeProvider>
-      <BrowserRouter>
-        <AuthProvider>
+    <BrowserRouter>
+      <AuthProvider>
+        <ThemeProvider>
           <PreferencesProvider>
+            <OfflineBanner />
             <AppRoutes />
           </PreferencesProvider>
-        </AuthProvider>
-      </BrowserRouter>
-    </ThemeProvider>
+        </ThemeProvider>
+      </AuthProvider>
+    </BrowserRouter>
   );
 }

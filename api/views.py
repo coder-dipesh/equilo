@@ -1,4 +1,3 @@
-import hashlib
 import io
 import secrets
 from datetime import date, timedelta, timezone as dt_utc
@@ -16,9 +15,21 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.viewsets import ModelViewSet
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.views import TokenObtainPairView as BaseTokenObtainPairView
+from rest_framework_simplejwt.views import TokenRefreshView as BaseTokenRefreshView
 
+from .jwt_serializers import EquiloTokenObtainPairSerializer, EquiloTokenRefreshSerializer
 from .models import Place, PlaceMember, ExpenseCategory, Expense, ExpenseSplit, PlaceInvite, UserProfile, Notification, ExpenseCycle, UserSession, Settlement, ActivityLog
+from .session_utils import (
+    blacklist_outstanding_for_jti,
+    clear_refresh_cookie,
+    get_refresh_token_from_request,
+    jti_from_refresh_string,
+    session_pk_from_access_header,
+    set_refresh_cookie,
+    upsert_session_for_refresh_token,
+)
 
 User = get_user_model()
 from .permissions import IsPlaceMember
@@ -33,8 +44,6 @@ from .serializers import (
     ExpenseCycleSerializer,
     UserSessionSerializer,
 )
-
-User = get_user_model()
 
 
 # ----- Auth (public) -----
@@ -100,74 +109,6 @@ def _profile_photo_url(request, user):
     except Exception:
         pass
     return None
-
-
-def _device_label_from_request(request):
-    """Parse User-Agent to a short device label, e.g. 'Chrome on Mac', 'iPhone'."""
-    ua = (request.META.get('HTTP_USER_AGENT') or '')[:500]
-    ua_lower = ua.lower()
-    if not ua:
-        return 'Unknown device'
-    # Mobile
-    if 'mobile' in ua_lower or 'android' in ua_lower:
-        if 'iphone' in ua_lower or 'ipad' in ua_lower:
-            return 'iPhone' if 'iphone' in ua_lower else 'iPad'
-        return 'Android'
-    # Desktop
-    browser = 'Browser'
-    if 'edg/' in ua_lower:
-        browser = 'Edge'
-    elif 'chrome' in ua_lower and 'chromium' not in ua_lower:
-        browser = 'Chrome'
-    elif 'firefox' in ua_lower:
-        browser = 'Firefox'
-    elif 'safari' in ua_lower and 'chrome' not in ua_lower:
-        browser = 'Safari'
-    os_name = 'Device'
-    if 'mac' in ua_lower or 'macintosh' in ua_lower:
-        os_name = 'Mac'
-    elif 'windows' in ua_lower:
-        os_name = 'Windows'
-    elif 'linux' in ua_lower:
-        os_name = 'Linux'
-    return f'{browser} on {os_name}'
-
-
-def _create_user_session(refresh_token_str, request):
-    """Create or update UserSession from a refresh token. Returns True if created/updated, False otherwise."""
-    from rest_framework_simplejwt.tokens import RefreshToken
-    try:
-        token = RefreshToken(refresh_token_str)
-        jti = str(token.get('jti', '') or '')
-        if not jti:
-            jti = hashlib.sha256(refresh_token_str.encode()).hexdigest()[:64]
-        exp = token.get('exp')
-        user_id = token.get('user_id') or token.get('sub')
-        if not exp or not user_id:
-            return False
-        user = User.objects.filter(pk=str(user_id)).first()
-        if not user:
-            return False
-        expires_at = timezone.datetime.fromtimestamp(exp, tz=dt_utc.utc)
-        device_label = _device_label_from_request(request)
-        user_agent = (request.META.get('HTTP_USER_AGENT') or '')[:1000]
-        UserSession.objects.update_or_create(
-            jti=jti,
-            defaults={
-                'user': user,
-                'refresh_token': refresh_token_str,
-                'device_label': device_label,
-                'user_agent': user_agent,
-                'expires_at': expires_at,
-            }
-        )
-        return True
-    except Exception as e:
-        # Don't break login/register if session tracking fails
-        if django_settings.DEBUG:
-            from traceback import format_exc
-            _create_user_session._last_error = format_exc()
-        return False
 
 
 @api_view(['GET', 'PATCH'])
@@ -263,55 +204,91 @@ def register(request):
     # Ensure profile exists for display_name/profile_photo consumers
     UserProfile.objects.get_or_create(user=user, defaults={'display_name': ''})
     from rest_framework_simplejwt.tokens import RefreshToken
-    refresh = RefreshToken.for_user(user)
 
-    refresh_str = str(refresh)
-    _create_user_session(refresh_str, request)
-    return Response({
+    refresh = RefreshToken.for_user(user)
+    session = upsert_session_for_refresh_token(str(refresh), request, user)
+    if session:
+        refresh['sid'] = session.pk
+    data = {
         'user': UserSerializer(user).data,
         'access': str(refresh.access_token),
-        'refresh': refresh_str,
-    }, status=status.HTTP_201_CREATED)
+        'refresh_jti': str(refresh.get('jti', '') or ''),
+    }
+    response = Response(data, status=status.HTTP_201_CREATED)
+    set_refresh_cookie(response, str(refresh))
+    return response
 
 
-class TokenObtainPairView(BaseTokenObtainPairView):
-    """Custom token obtain that creates UserSession for Active Sessions tracking."""
+class EquiloTokenObtainPairView(BaseTokenObtainPairView):
+    """Login: access + refresh_jti in body; refresh token only in HttpOnly cookie."""
+
+    serializer_class = EquiloTokenObtainPairSerializer
 
     def post(self, request, *args, **kwargs):
-        response = super().post(request, *args, **kwargs)
-        if response.status_code == 200 and response.data.get('refresh'):
-            try:
-                _create_user_session(response.data['refresh'], request)
-            except Exception:
-                # Never let session tracking break login
-                pass
+        serializer = self.get_serializer(data=request.data)
+        try:
+            serializer.is_valid(raise_exception=True)
+        except TokenError as e:
+            raise InvalidToken(e.args[0]) from e
+        data = dict(serializer.validated_data)
+        refresh = data.pop('refresh', None)
+        response = Response(data, status=status.HTTP_200_OK)
+        if refresh:
+            set_refresh_cookie(response, refresh)
         return response
 
 
-def _jti_from_refresh_token(refresh_str):
-    """Extract jti from refresh token, or a stable hash if jti missing. Returns None if invalid."""
+class CookieTokenRefreshView(BaseTokenRefreshView):
+    """Refresh: reads refresh from HttpOnly cookie when body omits it; sets rotated cookie."""
+
+    serializer_class = EquiloTokenRefreshSerializer
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        try:
+            serializer.is_valid(raise_exception=True)
+        except TokenError as e:
+            raise InvalidToken(e.args[0]) from e
+        data = dict(serializer.validated_data)
+        new_refresh = data.pop('refresh', None)
+        response = Response(data, status=status.HTTP_200_OK)
+        if new_refresh:
+            set_refresh_cookie(response, new_refresh)
+        return response
+
+
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def auth_logout(request):
+    """Blacklist current refresh (cookie or body) and clear refresh cookie."""
     from rest_framework_simplejwt.tokens import RefreshToken
-    try:
-        token = RefreshToken(refresh_str)
-        jti = str(token.get('jti', '') or '')
-        if jti:
-            return jti
-        return hashlib.sha256(refresh_str.encode()).hexdigest()[:64]
-    except Exception:
-        return None
+
+    raw = get_refresh_token_from_request(request)
+    if raw:
+        try:
+            token = RefreshToken(raw)
+            jti = str(token.get('jti', '') or '')
+            token.blacklist()
+            if jti:
+                UserSession.objects.filter(jti=jti).delete()
+        except Exception:
+            pass
+    response = Response({'detail': 'Logged out.'})
+    clear_refresh_cookie(response)
+    return response
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def sessions_register(request):
     """
-    Register the current device's session. Body: { "refresh": "..." }.
-    Call this when sessions list is empty to retroactively register the current device.
+    Register the current device's session from refresh cookie (or body for legacy).
     """
     from rest_framework_simplejwt.tokens import RefreshToken
-    refresh_str = (request.data.get('refresh') or '').strip()
+
+    refresh_str = get_refresh_token_from_request(request)
     if not refresh_str:
-        return Response({'refresh': ['This field is required.']}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'detail': 'No refresh token (cookie or body).'}, status=status.HTTP_400_BAD_REQUEST)
     try:
         token = RefreshToken(refresh_str)
         uid = token.get('user_id') or token.get('sub')
@@ -319,13 +296,10 @@ def sessions_register(request):
             return Response({'detail': 'Refresh token does not belong to current user.'}, status=status.HTTP_400_BAD_REQUEST)
     except Exception:
         return Response({'detail': 'Invalid refresh token.'}, status=status.HTTP_400_BAD_REQUEST)
-    ok = _create_user_session(refresh_str, request)
+    ok = upsert_session_for_refresh_token(refresh_str, request, request.user)
     if not ok:
-        detail = 'Could not save session. Run: python manage.py migrate'
-        if django_settings.DEBUG and getattr(_create_user_session, '_last_error', None):
-            detail = _create_user_session._last_error
         return Response(
-            {'detail': detail},
+            {'detail': 'Could not save session.'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
     return Response({'detail': 'Session registered.'})
@@ -335,16 +309,23 @@ def sessions_register(request):
 @permission_classes([IsAuthenticated])
 def sessions_list(request):
     """
-    List active sessions for the current user.
-    Query param ?current_jti=xxx marks that session as is_current (client sends jti from decoded refresh token).
+    List active sessions. Ensures this browser's session row exists when a refresh cookie is present.
+    is_current uses refresh cookie jti and/or access token `sid` (for UI only).
     """
     user = request.user
-    current_jti = request.query_params.get('current_jti', '').strip() or None
+    refresh_str = get_refresh_token_from_request(request)
+    if refresh_str:
+        try:
+            upsert_session_for_refresh_token(refresh_str, request, user)
+        except Exception:
+            pass
+    current_jti = jti_from_refresh_string(refresh_str) if refresh_str else None
+    current_sid = session_pk_from_access_header(request)
     sessions = UserSession.objects.filter(user=user, expires_at__gt=timezone.now()).order_by('-created_at')
     serializer = UserSessionSerializer(
         sessions,
         many=True,
-        context={'current_jti': current_jti}
+        context={'current_jti': current_jti, 'current_sid': current_sid},
     )
     return Response(serializer.data)
 
@@ -352,43 +333,46 @@ def sessions_list(request):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def session_revoke(request, jti):
-    """Revoke (logout) a specific session by jti."""
+    """Revoke (logout) a specific session by jti: blacklist + delete row."""
     user = request.user
     session = UserSession.objects.filter(user=user, jti=jti).first()
     if not session:
         return Response({'detail': 'Session not found.'}, status=status.HTTP_404_NOT_FOUND)
-    try:
-        from rest_framework_simplejwt.tokens import RefreshToken
-        token = RefreshToken(session.refresh_token)
-        token.blacklist()
-    except Exception:
-        pass
+    row_pk = session.pk
+    cookie_jti = jti_from_refresh_string(get_refresh_token_from_request(request))
+    current_sid = session_pk_from_access_header(request)
+    is_this_device = (cookie_jti and cookie_jti == jti) or (
+        current_sid is not None and row_pk == current_sid
+    )
+    blacklist_outstanding_for_jti(jti, user.id)
     session.delete()
-    return Response({'detail': 'Session revoked.'})
+    data = {'detail': 'Session revoked.'}
+    if is_this_device:
+        data['logout_required'] = True
+    response = Response(data)
+    if is_this_device:
+        clear_refresh_cookie(response)
+    return response
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def sessions_revoke_all(request):
     """
-    Revoke all other sessions (log out from all devices except this one).
-    Body: { "refresh": "..." } - the current device's refresh token. Sessions matching this jti are kept.
+    Revoke all other sessions. Current session is identified by refresh cookie (or body), never by client-only hints.
     """
     user = request.user
-    refresh_str = (request.data.get('refresh') or '').strip()
+    refresh_str = get_refresh_token_from_request(request)
     if not refresh_str:
-        return Response({'refresh': ['This field is required.']}, status=status.HTTP_400_BAD_REQUEST)
-    keep_jti = _jti_from_refresh_token(refresh_str)
+        return Response({'detail': 'No refresh token (cookie or body).'}, status=status.HTTP_400_BAD_REQUEST)
+    keep_jti = jti_from_refresh_string(refresh_str)
+    if not keep_jti:
+        return Response({'detail': 'Invalid refresh token.'}, status=status.HTTP_400_BAD_REQUEST)
     sessions = UserSession.objects.filter(user=user, expires_at__gt=timezone.now())
     for session in sessions:
         if session.jti == keep_jti:
             continue
-        try:
-            from rest_framework_simplejwt.tokens import RefreshToken
-            token = RefreshToken(session.refresh_token)
-            token.blacklist()
-        except Exception:
-            pass
+        blacklist_outstanding_for_jti(session.jti, user.id)
         session.delete()
     return Response({'detail': 'All other sessions revoked.'})
 
@@ -518,7 +502,13 @@ class ExpenseViewSet(ModelViewSet):
 
     def get_queryset(self):
         place_id = self.kwargs.get('place_id')
-        if not place_id or not PlaceMember.objects.filter(place_id=place_id, user=self.request.user).exists():
+        membership = None
+        if place_id:
+            try:
+                membership = PlaceMember.objects.get(place_id=place_id, user=self.request.user)
+            except PlaceMember.DoesNotExist:
+                pass
+        if not place_id or not membership:
             return Expense.objects.none()
         qs = (
             Expense.objects.filter(place_id=place_id)
@@ -526,19 +516,21 @@ class ExpenseViewSet(ModelViewSet):
             .prefetch_related('splits__user')
             .order_by('-created_at')
         )
+        # Only show expenses added on or after when this user joined the place
+        qs = qs.filter(created_at__gte=membership.joined_at)
         cycle_id = self.request.query_params.get('cycle_id')
         if cycle_id:
             try:
                 cid = int(cycle_id)
-                if PlaceMember.objects.filter(place_id=place_id, user=self.request.user).exists():
-                    if ExpenseCycle.objects.filter(place_id=place_id, pk=cid).exists():
-                        return qs.filter(cycle_id=cid)
+                if ExpenseCycle.objects.filter(place_id=place_id, pk=cid).exists():
+                    return qs.filter(cycle_id=cid)
             except ValueError:
                 pass
         current = _get_current_cycle(place_id)
         if current:
             return qs.filter(cycle_id=current.id)
-        return qs
+        # No open cycle: show only current cycle (none), not past expenses
+        return qs.none()
 
     def _can_edit_expense(self, request, expense):
         if not expense.place.members.filter(user=request.user).exists():
@@ -841,6 +833,93 @@ def request_payment(request, place_id):
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
+def remove_member(request, place_id):
+    """
+    Owner only. Remove a member from the place. Cannot remove self; cannot remove the last owner.
+    Body: { "user_id": <id> }.
+    """
+    try:
+        place = Place.objects.get(id=place_id)
+    except Place.DoesNotExist:
+        return Response({'error': 'Place not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    if not PlaceMember.objects.filter(place=place, user=request.user, role=PlaceMember.ROLE_OWNER).exists():
+        return Response({'error': 'Only the place owner can remove members'}, status=status.HTTP_403_FORBIDDEN)
+
+    target_id = request.data.get('user_id')
+    try:
+        target_id = int(target_id)
+    except (TypeError, ValueError):
+        return Response({'error': 'user_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+    if target_id == request.user.id:
+        return Response({'error': 'You cannot remove yourself. Use Leave place instead.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    try:
+        target_membership = PlaceMember.objects.get(place=place, user_id=target_id)
+    except PlaceMember.DoesNotExist:
+        return Response({'error': 'User is not a member of this place'}, status=status.HTTP_404_NOT_FOUND)
+
+    if target_membership.role == PlaceMember.ROLE_OWNER:
+        owner_count = place.members.filter(role=PlaceMember.ROLE_OWNER).count()
+        if owner_count <= 1:
+            return Response({'error': 'Cannot remove the last owner'}, status=status.HTTP_400_BAD_REQUEST)
+
+    target_user = target_membership.user
+    if _has_unsettled_balance(place.id, target_user):
+        return Response(
+            {'error': 'This member has unsettled balances in this place. They must settle all balances before being removed.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    target_membership.delete()
+    _log_activity(
+        request,
+        ActivityLog.TYPE_MEMBER_REMOVED,
+        place=place,
+        target_user=target_user,
+        description=f'Removed {_safe_display_name(target_user) or target_user.username} from the place',
+    )
+    return Response({'detail': 'Member removed'})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def leave_place(request, place_id):
+    """
+    Current user leaves the place. Only non-owners can leave (owner must delete the place or remove themselves via transfer first).
+    """
+    try:
+        place = Place.objects.get(id=place_id)
+    except Place.DoesNotExist:
+        return Response({'error': 'Place not found'}, status=status.HTTP_404_NOT_FOUND)
+
+    try:
+        membership = PlaceMember.objects.get(place=place, user=request.user)
+    except PlaceMember.DoesNotExist:
+        return Response({'error': 'You are not a member of this place'}, status=status.HTTP_403_FORBIDDEN)
+
+    if membership.role == PlaceMember.ROLE_OWNER:
+        owner_count = place.members.filter(role=PlaceMember.ROLE_OWNER).count()
+        if owner_count <= 1:
+            return Response(
+                {'error': 'As the only owner, you cannot leave. Delete the place or remove yourself after making someone else owner.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    if _has_unsettled_balance(place.id, request.user):
+        return Response(
+            {'error': 'You have unsettled balances in this place. Please settle all balances before leaving.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    membership.delete()
+    _log_activity(request, ActivityLog.TYPE_PLACE_LEFT, place=place, description=f'Left {place.name}')
+    return Response({'detail': 'You have left the place'})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
 def settlement_create(request):
     """
     POST /api/settlements/
@@ -895,25 +974,64 @@ def settlement_create(request):
     if amount <= 0:
         return Response({'error': 'amount must be greater than 0'}, status=status.HTTP_400_BAD_REQUEST)
 
-    balance_with = _compute_balance_all_time(place.id, me)
-    if from_user_id == me.id:
-        owed = balance_with.get(to_user_id, Decimal('0'))
-        if owed <= 0:
-            return Response({'error': 'You do not owe this member anything'}, status=status.HTTP_400_BAD_REQUEST)
-        if amount > owed:
-            return Response(
-                {'error': f'Amount cannot exceed what you owe ({owed:.2f})', 'max_amount': float(owed)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+    cycle_id_param = request.data.get('cycle_id')
+    use_cycle_balance = False
+    cycle = None
+    if cycle_id_param is not None:
+        try:
+            cid = int(cycle_id_param)
+            cycle = ExpenseCycle.objects.filter(place_id=place_id, pk=cid).first()
+            if cycle:
+                use_cycle_balance = True
+        except (TypeError, ValueError):
+            pass
+
+    # Tolerance for decimal comparison: allow rounding up to 1 cent so exact settlements (e.g. 153.06) are accepted
+    settlement_amount_tolerance = Decimal('0.01')
+
+    if use_cycle_balance:
+        payer = User.objects.filter(pk=from_user_id).first()
+        if not payer:
+            return Response({'error': 'Payer not found'}, status=status.HTTP_400_BAD_REQUEST)
+        _, _, _, balance_with = _compute_cycle_summary(place.id, payer, cycle)
+        if from_user_id == me.id:
+            owed = balance_with.get(to_user_id, Decimal('0'))
+            if owed <= 0:
+                return Response({'error': 'You do not owe this member anything in this cycle'}, status=status.HTTP_400_BAD_REQUEST)
+            if amount > owed + settlement_amount_tolerance:
+                return Response(
+                    {'error': f'Amount cannot exceed what you owe in this cycle ({owed:.2f})', 'max_amount': float(owed)},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            owed_to_me = -balance_with.get(from_user_id, Decimal('0'))
+            if owed_to_me <= 0:
+                return Response({'error': 'This member does not owe you anything in this cycle'}, status=status.HTTP_400_BAD_REQUEST)
+            if amount > owed_to_me + settlement_amount_tolerance:
+                return Response(
+                    {'error': f'Amount cannot exceed what they owe you in this cycle ({owed_to_me:.2f})', 'max_amount': float(owed_to_me)},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
     else:
-        owed_to_me = -balance_with.get(from_user_id, Decimal('0'))
-        if owed_to_me <= 0:
-            return Response({'error': 'This member does not owe you anything'}, status=status.HTTP_400_BAD_REQUEST)
-        if amount > owed_to_me:
-            return Response(
-                {'error': f'Amount cannot exceed what they owe you ({owed_to_me:.2f})', 'max_amount': float(owed_to_me)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+        balance_with = _compute_balance_all_time(place.id, me)
+        if from_user_id == me.id:
+            owed = balance_with.get(to_user_id, Decimal('0'))
+            if owed <= 0:
+                return Response({'error': 'You do not owe this member anything'}, status=status.HTTP_400_BAD_REQUEST)
+            if amount > owed + settlement_amount_tolerance:
+                return Response(
+                    {'error': f'Amount cannot exceed what you owe ({owed:.2f})', 'max_amount': float(owed)},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            owed_to_me = -balance_with.get(from_user_id, Decimal('0'))
+            if owed_to_me <= 0:
+                return Response({'error': 'This member does not owe you anything'}, status=status.HTTP_400_BAD_REQUEST)
+            if amount > owed_to_me + settlement_amount_tolerance:
+                return Response(
+                    {'error': f'Amount cannot exceed what they owe you ({owed_to_me:.2f})', 'max_amount': float(owed_to_me)},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
     settlement_date = timezone.now().date()
     if date_str:
@@ -923,6 +1041,7 @@ def settlement_create(request):
             return Response({'error': 'date must be ISO format YYYY-MM-DD'}, status=status.HTTP_400_BAD_REQUEST)
     settlement = Settlement.objects.create(
         place=place,
+        cycle=cycle,
         from_user_id=from_user_id,
         to_user_id=to_user_id,
         amount=amount,
@@ -1016,17 +1135,22 @@ class CycleListCreate(generics.ListCreateAPIView):
         if place.created_by_id != self.request.user.id:
             from rest_framework.exceptions import PermissionDenied
             raise PermissionDenied('Only the person who created the place can start a new cycle.')
-        # Ensure only one open cycle: resolve any existing open cycles before creating the new one
-        ExpenseCycle.objects.filter(place_id=place.id, status=ExpenseCycle.STATUS_OPEN).update(
-            status=ExpenseCycle.STATUS_RESOLVED
-        )
+        if ExpenseCycle.objects.filter(place_id=place.id, status=ExpenseCycle.STATUS_OPEN).exists():
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError(
+                'A cycle is still open. Wait for the end date (it will move to settlement), '
+                'then settle up and resolve it before starting a new cycle.'
+            )
         serializer.save(place=place)
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def cycle_resolve(request, place_id, pk):
-    """Mark a cycle as resolved (closed). Only the place creator can resolve."""
+    """
+    Mark a cycle as resolved (closed). Only the place creator can resolve.
+    Only allowed when cycle is PENDING_SETTLEMENT and all balances are zero.
+    """
     place = Place.objects.filter(id=place_id).first()
     if not place or not PlaceMember.objects.filter(place_id=place_id, user=request.user).exists():
         return Response({'error': 'Not a member'}, status=status.HTTP_403_FORBIDDEN)
@@ -1037,15 +1161,21 @@ def cycle_resolve(request, place_id, pk):
         return Response({'error': 'Cycle not found'}, status=status.HTTP_404_NOT_FOUND)
     if cycle.status == ExpenseCycle.STATUS_RESOLVED:
         return Response({'error': 'Cycle already resolved'}, status=status.HTTP_400_BAD_REQUEST)
+    if not _cycle_all_settled(place_id, cycle):
+        return Response(
+            {'error': 'All balances must be settled before resolving. Record settlements until everyone is at zero.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     cycle.status = ExpenseCycle.STATUS_RESOLVED
-    cycle.save(update_fields=['status'])
+    cycle.resolved_at = timezone.now()
+    cycle.save(update_fields=['status', 'resolved_at'])
     return Response(ExpenseCycleSerializer(cycle).data)
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def cycle_reopen(request, place_id, pk):
-    """Reopen a resolved cycle (undo). Only the place creator; only when there is no other open cycle."""
+    """Reopen a resolved cycle (undo). Only the place creator; only when there is no open or pending cycle."""
     place = Place.objects.filter(id=place_id).first()
     if not place or not PlaceMember.objects.filter(place_id=place_id, user=request.user).exists():
         return Response({'error': 'Not a member'}, status=status.HTTP_403_FORBIDDEN)
@@ -1062,12 +1192,19 @@ def cycle_reopen(request, place_id, pk):
             {'error': 'Only a resolved cycle can be reopened.'},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    # Keep single open cycle: resolve any current open cycle, then reopen the selected one
-    ExpenseCycle.objects.filter(place_id=place_id, status=ExpenseCycle.STATUS_OPEN).update(
-        status=ExpenseCycle.STATUS_RESOLVED
-    )
+    if ExpenseCycle.objects.filter(place_id=place_id, status=ExpenseCycle.STATUS_OPEN).exists():
+        return Response(
+            {'error': 'Another cycle is still open. Wait for it to end and resolve it first.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if ExpenseCycle.objects.filter(place_id=place_id, status=ExpenseCycle.STATUS_PENDING_SETTLEMENT).exists():
+        return Response(
+            {'error': 'A cycle is pending settlement. Resolve it before reopening a past cycle.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
     cycle.status = ExpenseCycle.STATUS_OPEN
-    cycle.save(update_fields=['status'])
+    cycle.resolved_at = None
+    cycle.save(update_fields=['status', 'resolved_at'])
     return Response(ExpenseCycleSerializer(cycle).data)
 
 
@@ -1101,10 +1238,18 @@ def _period_dates(period, from_date=None, week_start='monday'):
     return start, end
 
 
+def _expenses_since_joined(place_id, user):
+    """Base expense queryset for place, filtered by user's join date so they only see expenses after they joined."""
+    try:
+        membership = PlaceMember.objects.get(place_id=place_id, user=user)
+        return Expense.objects.filter(place_id=place_id, created_at__gte=membership.joined_at)
+    except PlaceMember.DoesNotExist:
+        return Expense.objects.none()
+
+
 def _compute_period_summary(place_id, me, start_date, end_date):
     """Returns total_expense, my_expense, total_i_paid, balance_with (dict user_id -> Decimal)."""
-    expenses = Expense.objects.filter(
-        place_id=place_id,
+    expenses = _expenses_since_joined(place_id, me).filter(
         date__gte=start_date,
         date__lte=end_date,
     ).prefetch_related('splits__user')
@@ -1120,7 +1265,7 @@ def _compute_period_summary(place_id, me, start_date, end_date):
 
 def _compute_cycle_summary(place_id, me, cycle):
     """Returns total_expense, my_expense, total_i_paid, balance_with for expenses in this cycle."""
-    expenses = Expense.objects.filter(place_id=place_id, cycle=cycle).prefetch_related('splits__user')
+    expenses = _expenses_since_joined(place_id, me).filter(cycle=cycle).prefetch_related('splits__user')
     total_expense, my_expense, total_i_paid, balance_with = _compute_balance_from_expenses(expenses, me)
     settlements = Settlement.objects.filter(
         place_id=place_id,
@@ -1198,7 +1343,7 @@ def place_summary(request, place_id):
             prev_total = Decimal('0')
             prev_cycle = ExpenseCycle.objects.filter(place_id=place_id, start_date__lt=cycle.start_date).order_by('-start_date').first()
             if prev_cycle:
-                prev_total = sum(e.amount for e in Expense.objects.filter(place_id=place_id, cycle=prev_cycle))
+                prev_total = sum(e.amount for e in _expenses_since_joined(place_id, me).filter(cycle=prev_cycle))
         else:
             total_expense, my_expense, total_i_paid, balance_with = _compute_period_summary(
                 place_id, me, start_date, end_date
@@ -1231,15 +1376,19 @@ def place_summary(request, place_id):
                 user_map[u.id] = {
                     'username': u.username,
                     'display_name': _safe_display_name(u) or u.username,
+                    'email': getattr(u, 'email', '') or '',
                     'profile_photo': _profile_photo_url(request, u),
                 }
+        balance_all_time = _compute_balance_all_time(place_id, me)
         by_member_balance_list = [
             {
                 'user_id': uid,
                 'username': (user_map.get(uid) or {}).get('username') or f'User {uid}',
                 'display_name': (user_map.get(uid) or {}).get('display_name') or user_map.get(uid, {}).get('username') or f'User {uid}',
+                'email': (user_map.get(uid) or {}).get('email') or '',
                 'profile_photo': (user_map.get(uid) or {}).get('profile_photo'),
                 'balance': float(balance_with[uid]),
+                'all_time_balance': float(balance_all_time.get(uid, Decimal('0'))),
             }
             for uid in user_ids
         ]
@@ -1262,6 +1411,7 @@ def place_summary(request, place_id):
         }
         if cycle:
             payload['cycle'] = ExpenseCycleSerializer(cycle).data
+            payload['all_settled'] = _cycle_all_settled(place_id, cycle)
         return Response(payload)
     except Exception as exc:
         return Response({
@@ -1298,7 +1448,7 @@ def _apply_settlements_to_balance(balance_with, settlements, me):
 
 def _compute_balance_all_time(place_id, me):
     """Returns balance_with dict (user_id -> Decimal). Positive = I owe them, negative = they owe me."""
-    expenses = Expense.objects.filter(place_id=place_id).prefetch_related('splits__user')
+    expenses = _expenses_since_joined(place_id, me).prefetch_related('splits__user')
     balance_with = {}
     for exp in expenses:
         splits = list(exp.splits.all())
@@ -1314,6 +1464,69 @@ def _compute_balance_all_time(place_id, me):
     settlements = Settlement.objects.filter(place_id=place_id).select_related('from_user', 'to_user')
     _apply_settlements_to_balance(balance_with, settlements, me)
     return balance_with
+
+
+def _has_unsettled_balance(place_id, user):
+    """True if the user has any non-zero balance (owes or is owed) in this place."""
+    balance_with = _compute_balance_all_time(place_id, user)
+    return any(v != 0 for v in balance_with.values())
+
+
+def _cycle_all_settled(place_id, cycle):
+    """True if every member's net balance for this cycle is zero (within 0.01 tolerance)."""
+    from decimal import Decimal
+    tolerance = Decimal('0.01')
+    for member in PlaceMember.objects.filter(place_id=place_id).select_related('user'):
+        try:
+            _, _, _, balance_with = _compute_cycle_summary(place_id, member.user, cycle)
+        except Exception:
+            return False
+        net = sum(balance_with.values())
+        if abs(net) > tolerance:
+            return False
+    return True
+
+
+def _send_cycle_ended_notifications(place, cycle):
+    """
+    After a cycle is resolved, create a notification for each member with their
+    settlement summary. Tapping opens place Summary tab to settle up.
+    """
+    period_label = f"{cycle.start_date.strftime('%b %d')} – {cycle.end_date.strftime('%b %d')}"
+    title = f"Cycle ended: {place.name} ({period_label})"
+    for member in place.members.select_related('user', 'user__profile'):
+        user = member.user
+        try:
+            _, _, _, balance_with = _compute_cycle_summary(place.id, user, cycle)
+        except Exception:
+            balance_with = {}
+        parts = []
+        for other_uid, bal in balance_with.items():
+            if bal == 0:
+                continue
+            other = User.objects.filter(id=other_uid).select_related('profile').first()
+            other_name = _safe_display_name(other) or (other.username if other else f"User {other_uid}")
+            if bal > 0:
+                parts.append(f"You owe ${bal:.2f} to {other_name}")
+            else:
+                parts.append(f"{other_name} owes you ${(-bal):.2f}")
+        message = " Tap to settle up." if parts else " You're all settled for this cycle."
+        if parts:
+            message = " ".join(parts) + message
+        else:
+            message = f"Cycle {period_label} closed." + message
+        Notification.objects.create(
+            user=user,
+            place=place,
+            type=Notification.TYPE_CYCLE_ENDED,
+            title=title,
+            message=message,
+            data={
+                'place_id': place.id,
+                'cycle_id': cycle.id,
+                'open_settlement': True,
+            },
+        )
 
 
 def _activity_item_from_log(request, log):
@@ -1550,6 +1763,7 @@ def dashboard(request):
                 'id': m.user_id,
                 'username': getattr(m.user, 'username', ''),
                 'display_name': _safe_display_name(m.user) or getattr(m.user, 'username', ''),
+                'profile_photo': _profile_photo_url(request, m.user),
             }
             for m in p.members.select_related('user', 'user__profile').all()[:5]
         ]

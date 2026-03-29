@@ -3,15 +3,49 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0967F7" />
     <title>Equilo – Split bills with your place</title>
+    <meta
+      name="description"
+      content="Equilo helps housemates track shared expenses, settle balances, and keep things fair—without awkward money talks."
+    />
+    <!-- Open Graph / iMessage, WhatsApp, Slack, etc. (image URL must be absolute) -->
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Equilo" />
+    <meta property="og:title" content="Equilo – Split bills with your place" />
+    <meta
+      property="og:description"
+      content="Track shared expenses, settle balances, and invite your housemates in one place."
+    />
+    <meta property="og:url" content="https://equilo.app/" />
+    <meta property="og:image" content="https://equilo.app/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Equilo — split bills with your place" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Equilo – Split bills with your place" />
+    <meta
+      name="twitter:description"
+      content="Track shared expenses, settle balances, and invite your housemates in one place."
+    />
+    <meta name="twitter:image" content="https://equilo.app/og-image.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <script>
       (function () {
+        var hasToken = !!(sessionStorage.getItem('equilo_access') || localStorage.getItem('access'));
         var t = localStorage.getItem('theme');
-        if (t !== 'light' && t !== 'dark') t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        if (!hasToken) {
+          t = 'light';
+        } else if (t !== 'light' && t !== 'dark' && t !== 'system') {
+          t = 'light';
+        }
+        if (t === 'system') {
+          t = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
         document.documentElement.setAttribute('data-theme', t === 'light' ? 'silk' : 'dark');
       })();
     </script>

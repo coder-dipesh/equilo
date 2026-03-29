@@ -17,12 +17,12 @@ Shared expense tracking for roommates: create a **Place** (your apartment/house)
 python -m venv venv
 source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
-# Optional: set DATABASE_URL for Supabase (see below)
+# Optional: set DATABASE_URL for Supabase (see below). Do not set VERCEL locally.
 python manage.py migrate
 make run
 ```
 
-API: `http://localhost:8000/api/`
+API: `http://localhost:8001/api/` (see Makefile). Profile photos are stored in `./media/` locally; production uses Supabase Storage.
 
 ### Frontend (React)
 

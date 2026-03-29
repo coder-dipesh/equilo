@@ -1,23 +1,25 @@
 import { createContext, useContext, useEffect, useState } from 'react';
+import { useAuth } from './AuthContext';
 
 const ThemeContext = createContext({
-  theme: 'dark',
-  themePreference: 'dark',
+  theme: 'light',
+  themePreference: 'light',
   setTheme: () => {},
-  resolvedTheme: 'dark',
+  resolvedTheme: 'light',
 });
 
 function getSystemTheme() {
-  if (typeof window === 'undefined') return 'dark';
+  if (typeof window === 'undefined') return 'light';
   return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 
 export function ThemeProvider({ children }) {
+  const { user, loading } = useAuth();
   const [themePreference, setThemePreferenceState] = useState(() => {
-    if (typeof window === 'undefined') return 'dark';
+    if (typeof window === 'undefined') return 'light';
     const t = localStorage.getItem('theme');
     if (t === 'light' || t === 'dark' || t === 'system') return t;
-    return 'system';
+    return 'light';
   });
   const [systemTheme, setSystemTheme] = useState(getSystemTheme);
 
@@ -31,8 +33,24 @@ export function ThemeProvider({ children }) {
   const resolvedTheme = themePreference === 'system' ? systemTheme : themePreference;
 
   useEffect(() => {
+    const token =
+      typeof window !== 'undefined'
+        ? sessionStorage.getItem('equilo_access') || localStorage.getItem('access')
+        : null;
+    if (loading) {
+      if (!token) {
+        document.documentElement.setAttribute('data-theme', 'silk');
+      } else {
+        document.documentElement.setAttribute('data-theme', resolvedTheme === 'light' ? 'silk' : 'dark');
+      }
+      return;
+    }
+    if (!user) {
+      document.documentElement.setAttribute('data-theme', 'silk');
+      return;
+    }
     document.documentElement.setAttribute('data-theme', resolvedTheme === 'light' ? 'silk' : 'dark');
-  }, [resolvedTheme]);
+  }, [user, loading, resolvedTheme]);
 
   useEffect(() => {
     localStorage.setItem('theme', themePreference);

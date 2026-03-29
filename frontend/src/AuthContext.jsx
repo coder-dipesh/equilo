@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect } from 'react';
-import { auth as authApi } from './api';
+import { auth as authApi, persistAccessToken, getAccessToken, clearAccessToken } from './api';
 
 const AuthContext = createContext(null);
 
@@ -15,17 +15,20 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token = localStorage.getItem('access');
+    const token = getAccessToken();
     if (!token) {
       setLoading(false);
       return;
     }
-    authApi.me()
+    authApi
+      .me()
       .then((userData) => {
         setUser(userData);
         try {
           localStorage.setItem('user', JSON.stringify(userData));
-        } catch {}
+        } catch {
+          /* empty */
+        }
       })
       .catch(() => {})
       .finally(() => setLoading(false));
@@ -33,8 +36,7 @@ export function AuthProvider({ children }) {
 
   const login = async (username, password) => {
     const data = await authApi.login(username, password);
-    localStorage.setItem('access', data.access);
-    localStorage.setItem('refresh', data.refresh);
+    if (data.access) persistAccessToken(data.access);
     const userData = await authApi.me();
     setUser(userData);
     localStorage.setItem('user', JSON.stringify(userData));
@@ -43,20 +45,34 @@ export function AuthProvider({ children }) {
 
   const register = async (username, email, password) => {
     const data = await authApi.register(username, email || '', password);
-    localStorage.setItem('access', data.access);
-    localStorage.setItem('refresh', data.refresh);
+    if (data.access) persistAccessToken(data.access);
     const userData = data.user
-      ? { id: data.user.id, username: data.user.username, email: data.user.email, display_name: data.user.display_name, profile_photo: data.user.profile_photo }
+      ? {
+          id: data.user.id,
+          username: data.user.username,
+          email: data.user.email,
+          display_name: data.user.display_name,
+          profile_photo: data.user.profile_photo,
+        }
       : null;
     setUser(userData);
     if (userData) localStorage.setItem('user', JSON.stringify(userData));
     return data;
   };
 
-  const logout = () => {
-    localStorage.removeItem('access');
-    localStorage.removeItem('refresh');
-    localStorage.removeItem('user');
+  const logout = async () => {
+    try {
+      await authApi.logout();
+    } catch {
+      clearAccessToken();
+      try {
+        localStorage.removeItem('user');
+      } catch {
+        /* empty */
+      }
+      setUser(null);
+      return;
+    }
     setUser(null);
   };
 
@@ -66,7 +82,9 @@ export function AuthProvider({ children }) {
       const u = localStorage.getItem('user');
       const parsed = u ? JSON.parse(u) : null;
       if (parsed) localStorage.setItem('user', JSON.stringify({ ...parsed, ...next }));
-    } catch {}
+    } catch {
+      /* empty */
+    }
   };
 
   return (
