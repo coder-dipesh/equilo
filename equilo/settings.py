@@ -57,17 +57,27 @@ INSTALLED_APPS = [
     'api',
 ]
 
-MIDDLEWARE = [
-    'django.middleware.security.SecurityMiddleware',
-    'whitenoise.middleware.WhiteNoiseMiddleware',  # Serve static files (admin CSS/JS)
-    'corsheaders.middleware.CorsMiddleware',  # CORS before CommonMiddleware
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
-]
+def _middleware_list():
+    m = [
+        'django.middleware.security.SecurityMiddleware',
+    ]
+    try:
+        import whitenoise  # noqa: F401
+        m.append('whitenoise.middleware.WhiteNoiseMiddleware')
+    except ImportError:
+        pass
+    m.extend([
+        'corsheaders.middleware.CorsMiddleware',  # CORS before CommonMiddleware
+        'django.contrib.sessions.middleware.SessionMiddleware',
+        'django.middleware.common.CommonMiddleware',
+        'django.middleware.csrf.CsrfViewMiddleware',
+        'django.contrib.auth.middleware.AuthenticationMiddleware',
+        'django.contrib.messages.middleware.MessageMiddleware',
+        'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    ])
+    return m
+
+MIDDLEWARE = _middleware_list()
 
 ROOT_URLCONF = 'equilo.urls'
 
@@ -146,7 +156,7 @@ STATIC_URL = 'static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 # Media files (user uploads, e.g. profile photos)
-# In production: use Supabase Storage. In dev: local filesystem.
+# Local: filesystem (media/). Production (Vercel): Supabase Storage required.
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '').strip()
 SUPABASE_KEY = (
     os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
@@ -154,12 +164,24 @@ SUPABASE_KEY = (
     or os.environ.get('SUPABASE_KEY', '')
 ).strip()
 SUPABASE_MEDIA_BUCKET = os.environ.get('SUPABASE_MEDIA_BUCKET', 'media')
-# Ensure django-supabase-storage can read these (it uses SUPABASE_KEY, SUPABASE_BUCKET_NAME)
-if SUPABASE_URL and SUPABASE_KEY:
+# Only enforce "must use Supabase" when on Vercel production (DEBUG=False). Local/dev always uses ./media/.
+_on_vercel = os.environ.get('VERCEL') == '1'
+_running_locally = os.environ.get('RUNNING_LOCALLY', '').lower() in ('1', 'true', 'yes')
+# DEBUG is True by default; on Vercel you set DEBUG=False, so this treats local runs as non-Vercel for media
+_require_supabase_on_vercel = _on_vercel and not _running_locally and not DEBUG
+
+def _use_supabase_media():
+    if not (SUPABASE_URL and SUPABASE_KEY):
+        return False
+    try:
+        import django_supabase_storage  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+if _use_supabase_media():
     os.environ['SUPABASE_KEY'] = SUPABASE_KEY
     os.environ.setdefault('SUPABASE_BUCKET_NAME', SUPABASE_MEDIA_BUCKET)
-
-if SUPABASE_URL and SUPABASE_KEY:
     STORAGES = {
         'default': {
             'BACKEND': 'django_supabase_storage.SupabaseMediaStorage',
@@ -169,14 +191,13 @@ if SUPABASE_URL and SUPABASE_KEY:
         },
     }
     MEDIA_URL = f'{SUPABASE_URL.rstrip("/")}/storage/v1/object/public/{SUPABASE_MEDIA_BUCKET}/'
-    MEDIA_ROOT = ''  # Not used when Supabase is backend
+    MEDIA_ROOT = ''
 else:
-    if os.environ.get('VERCEL'):
+    if _require_supabase_on_vercel:
         from django.core.exceptions import ImproperlyConfigured
         raise ImproperlyConfigured(
-            'On Vercel, SUPABASE_URL and SUPABASE_SERVICE_KEY must be set for media (profile photos). '
-            'Vercel has a read-only filesystem. Add them in Vercel → Project Settings → Environment Variables. '
-            'Create a "media" bucket in Supabase Storage first.'
+            'On Vercel (DEBUG=False), SUPABASE_URL and SUPABASE_SERVICE_KEY (or SUPABASE_SERVICE_ROLE_KEY) must be set for media. '
+            'Add them in Vercel → Project Settings → Environment Variables.'
         )
     MEDIA_URL = 'media/'
     MEDIA_ROOT = BASE_DIR / 'media'
@@ -187,7 +208,7 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 # REST Framework
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'api.authentication.SessionTrackingJWTAuthentication',
         'rest_framework.authentication.SessionAuthentication',
     ],
     'DEFAULT_PERMISSION_CLASSES': [
@@ -196,18 +217,46 @@ REST_FRAMEWORK = {
     'DEFAULT_FILTER_BACKENDS': ['django_filters.rest_framework.DjangoFilterBackend'],
 }
 
-# JWT (Simple JWT)
+# JWT (Simple JWT) — short access token, rotating refresh + blacklist
 from datetime import timedelta
+
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
+    'ROTATE_REFRESH_TOKENS': True,
+    'BLACKLIST_AFTER_ROTATION': True,
+    'TOKEN_OBTAIN_SERIALIZER': 'api.jwt_serializers.EquiloTokenObtainPairSerializer',
+    'TOKEN_REFRESH_SERIALIZER': 'api.jwt_serializers.EquiloTokenRefreshSerializer',
 }
 
-# CORS - allow React frontend
+# HttpOnly refresh cookie (set by login/register/refresh responses)
+REFRESH_TOKEN_COOKIE_NAME = os.environ.get('REFRESH_TOKEN_COOKIE_NAME', 'equilo_refresh')
+REFRESH_TOKEN_COOKIE_PATH = os.environ.get('REFRESH_TOKEN_COOKIE_PATH', '/')
+REFRESH_TOKEN_COOKIE_SECURE = os.environ.get(
+    'REFRESH_TOKEN_COOKIE_SECURE', str(not DEBUG).lower()
+).lower() in ('1', 'true', 'yes')
+REFRESH_TOKEN_SAMESITE = os.environ.get('REFRESH_TOKEN_SAMESITE', 'Lax')
+if os.environ.get('REFRESH_TOKEN_CROSS_SITE', '').lower() in ('1', 'true', 'yes'):
+    REFRESH_TOKEN_SAMESITE = 'None'
+    REFRESH_TOKEN_COOKIE_SECURE = True
+
+# Cap concurrent device sessions (oldest revoked when exceeded)
+MAX_ACTIVE_SESSIONS_PER_USER = int(os.environ.get('MAX_ACTIVE_SESSIONS_PER_USER', '10'))
+
+# CORS — credentials required for refresh cookie; do not use * origins
 CORS_ALLOWED_ORIGINS = [
     'http://localhost:3000',
     'http://127.0.0.1:3000',
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
 ]
 if os.environ.get('CORS_ORIGINS'):
     CORS_ALLOWED_ORIGINS.extend(origin.strip() for origin in os.environ['CORS_ORIGINS'].split(','))
-CORS_ALLOW_ALL_ORIGINS = DEBUG
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOW_ALL_ORIGINS = False
+
+# Celery (broker for tasks; Beat runs auto_resolve_past_cycles daily)
+CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://localhost:6379/0')
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_TIMEZONE = TIME_ZONE

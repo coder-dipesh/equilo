@@ -1,7 +1,5 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from rest_framework_simplejwt.views import TokenRefreshView
-
 from . import views
 
 router = DefaultRouter()
@@ -16,6 +14,8 @@ urlpatterns = [
     path('notifications/mark_all_read/', views.notifications_mark_all_read),
     path('notifications/<int:notification_id>/read/', views.notifications_mark_read),
     path('places/<int:place_id>/request_payment/', views.request_payment, name='place-request-payment'),
+    path('places/<int:place_id>/members/remove/', views.remove_member, name='place-remove-member'),
+    path('places/<int:place_id>/leave/', views.leave_place, name='place-leave'),
     path('places/<int:place_id>/settlements/', views.settlement_list, name='place-settlements'),
     path('settlements/', views.settlement_create, name='settlement-create'),
     path('auth/me/', views.me),
@@ -26,8 +26,9 @@ urlpatterns = [
     path('auth/sessions/revoke_all/', views.sessions_revoke_all),
     path('auth/sessions/<str:jti>/revoke/', views.session_revoke),
     path('auth/register/', views.register),
-    path('auth/token/', views.TokenObtainPairView.as_view(), name='token_obtain_pair'),
-    path('auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('auth/logout/', views.auth_logout),
+    path('auth/token/', views.EquiloTokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('auth/token/refresh/', views.CookieTokenRefreshView.as_view(), name='token_refresh'),
     path('invite/<str:token>/', views.invite_by_token),
     path('join/<str:token>/', views.join_place),
     path('', include(router.urls)),

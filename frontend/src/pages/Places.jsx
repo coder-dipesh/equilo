@@ -17,11 +17,21 @@ import {
   Pencil,
 } from 'lucide-react';
 
-function UserAvatar({ username, size = 'md', className = '' }) {
+function UserAvatar({ username, photoUrl, size = 'md', className = '' }) {
   const initial = username ? username.charAt(0).toUpperCase() : '?';
   const sizeClass =
     size === 'xs' ? 'w-6 h-6 text-xs' :
     size === 'sm' ? 'w-8 h-8 text-sm' : 'w-10 h-10 text-lg';
+  if (photoUrl) {
+    return (
+      <div
+        className={`rounded-full overflow-hidden bg-base-300 shrink-0 ring-2 ring-base-100 ${sizeClass} ${className}`}
+        aria-hidden="true"
+      >
+        <img src={photoUrl} alt="" className="w-full h-full object-cover" />
+      </div>
+    );
+  }
   return (
     <div
       className={`rounded-full bg-primary/20 text-primary flex items-center justify-center font-semibold ring-2 ring-base-100 shrink-0 ${sizeClass} ${className}`}
@@ -41,7 +51,11 @@ function StackedMemberAvatars({ members, totalCount, maxShow = 4 }) {
         <span className="flex -space-x-2" aria-hidden="true">
           {list.map((m) => (
             <span key={m.id ?? m.user?.id} className="inline-block ring-2 ring-base-100 rounded-full">
-              <UserAvatar username={m.user?.display_name || m.user?.username} size="xs" />
+              <UserAvatar
+                username={m.user?.display_name || m.user?.username}
+                photoUrl={m.user?.profile_photo}
+                size="xs"
+              />
             </span>
           ))}
         </span>

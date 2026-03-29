@@ -1,15 +1,18 @@
 function resolveApiBase() {
+  // Dev must use same-origin `/api` (Vite proxy → Django) so HttpOnly refresh cookies are sent.
+  // If VITE_API_URL pointed at :8001 here, requests would be cross-origin and cookies would not attach.
+  if (import.meta.env.DEV) {
+    return '/api';
+  }
   const raw = (import.meta.env.VITE_API_URL || '').trim();
   if (raw) {
     try {
       const u = new URL(raw);
-      // Guard against `http://:8001/api` (empty hostname)
       if (u.hostname) return raw.replace(/\/+$/, '');
     } catch {
       // fall through
     }
   }
-  // Sensible dev default: same host as frontend, Django on 8001
   const host = (typeof window !== 'undefined' && window.location?.hostname) ? window.location.hostname : 'localhost';
   return `http://${host}:8001/api`;
 }
@@ -17,18 +20,53 @@ function resolveApiBase() {
 const API_BASE = resolveApiBase();
 const DEFAULT_TIMEOUT_MS = 12000;
 
+/** Short-lived access token (sessionStorage); refresh stays HttpOnly cookie. */
+const ACCESS_STORAGE_KEY = 'equilo_access';
+
+function getAccessToken() {
+  try {
+    return (
+      sessionStorage.getItem(ACCESS_STORAGE_KEY) ||
+      localStorage.getItem('access') ||
+      null
+    );
+  } catch {
+    return null;
+  }
+}
+
+function setAccessToken(token) {
+  try {
+    sessionStorage.setItem(ACCESS_STORAGE_KEY, token);
+    localStorage.removeItem('access');
+  } catch {
+    try {
+      localStorage.setItem('access', token);
+    } catch {
+      /* empty */
+    }
+  }
+}
+
+function clearAccessToken() {
+  try {
+    sessionStorage.removeItem(ACCESS_STORAGE_KEY);
+    localStorage.removeItem('access');
+  } catch {
+    /* empty */
+  }
+}
+
+const defaultFetchOptions = { credentials: 'include' };
+
 async function fetchWithTimeout(input, init = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
+    return await fetch(input, { ...defaultFetchOptions, ...init, signal: controller.signal });
   } finally {
     window.clearTimeout(timeoutId);
   }
-}
-
-function getToken() {
-  return localStorage.getItem('access');
 }
 
 export async function api(url, options = {}) {
@@ -36,7 +74,7 @@ export async function api(url, options = {}) {
     'Content-Type': 'application/json',
     ...options.headers,
   };
-  const token = getToken();
+  const token = getAccessToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
   let res;
   try {
@@ -46,14 +84,14 @@ export async function api(url, options = {}) {
     throw e;
   }
   if (res.status === 401) {
-    const refresh = localStorage.getItem('refresh');
-    if (refresh) {
+    const isLoginOrRegister = url === '/auth/token/' || url.startsWith('/auth/register');
+    if (!isLoginOrRegister) {
       let r;
       try {
         r = await fetchWithTimeout(`${API_BASE}/auth/token/refresh/`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refresh }),
+          body: JSON.stringify({}),
         });
       } catch (e) {
         if (e?.name === 'AbortError') throw { status: 0, message: 'Request timed out' };
@@ -61,15 +99,21 @@ export async function api(url, options = {}) {
       }
       if (r.ok) {
         const data = await r.json();
-        localStorage.setItem('access', data.access);
+        if (data.access) setAccessToken(data.access);
         return api(url, options);
       }
     }
-    localStorage.removeItem('access');
-    localStorage.removeItem('refresh');
-    localStorage.removeItem('user');
-    window.location.href = '/login';
-    throw new Error('Unauthorized');
+    clearAccessToken();
+    try {
+      localStorage.removeItem('user');
+    } catch {
+      /* empty */
+    }
+    if (!isLoginOrRegister) {
+      window.location.href = '/login';
+    }
+    const data = await res.json().catch(() => ({}));
+    throw { status: 401, ...data };
   }
   const data = res.ok ? await res.json().catch(() => ({})) : await res.json().catch(() => ({}));
   if (!res.ok) throw { status: res.status, ...data };
@@ -77,7 +121,7 @@ export async function api(url, options = {}) {
 }
 
 export async function apiWithFormData(url, formData, method = 'PATCH') {
-  const token = getToken();
+  const token = getAccessToken();
   const headers = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
   let res;
@@ -88,48 +132,34 @@ export async function apiWithFormData(url, formData, method = 'PATCH') {
     throw e;
   }
   if (res.status === 401) {
-    const refresh = localStorage.getItem('refresh');
-    if (refresh) {
-      let r;
-      try {
-        r = await fetchWithTimeout(`${API_BASE}/auth/token/refresh/`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refresh }),
-        });
-      } catch (e) {
-        if (e?.name === 'AbortError') throw { status: 0, message: 'Request timed out' };
-        throw e;
-      }
-      if (r.ok) {
-        const data = await r.json();
-        localStorage.setItem('access', data.access);
-        return apiWithFormData(url, formData, method);
-      }
+    let r;
+    try {
+      r = await fetchWithTimeout(`${API_BASE}/auth/token/refresh/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+    } catch (e) {
+      if (e?.name === 'AbortError') throw { status: 0, message: 'Request timed out' };
+      throw e;
     }
-    localStorage.removeItem('access');
-    localStorage.removeItem('refresh');
-    localStorage.removeItem('user');
+    if (r.ok) {
+      const data = await r.json();
+      if (data.access) setAccessToken(data.access);
+      return apiWithFormData(url, formData, method);
+    }
+    clearAccessToken();
+    try {
+      localStorage.removeItem('user');
+    } catch {
+      /* empty */
+    }
     window.location.href = '/login';
     throw new Error('Unauthorized');
   }
   const data = res.ok ? await res.json().catch(() => ({})) : await res.json().catch(() => ({}));
   if (!res.ok) throw { status: res.status, ...data };
   return data;
-}
-
-/** Decode JWT payload (base64) to get jti. Returns null if invalid. */
-export function getJtiFromRefreshToken() {
-  try {
-    const refresh = localStorage.getItem('refresh');
-    if (!refresh) return null;
-    const parts = refresh.split('.');
-    if (parts.length !== 3) return null;
-    const payload = JSON.parse(atob(parts[1]));
-    return payload.jti || null;
-  } catch {
-    return null;
-  }
 }
 
 export const auth = {
@@ -146,23 +176,43 @@ export const auth = {
     api('/auth/register/', { method: 'POST', body: JSON.stringify({ username, email, password }) }),
   login: (username, password) =>
     api('/auth/token/', { method: 'POST', body: JSON.stringify({ username, password }) }),
+  logout: () =>
+    fetchWithTimeout(`${API_BASE}/auth/logout/`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    }).then((r) => {
+      clearAccessToken();
+      try {
+        localStorage.removeItem('user');
+      } catch {
+        /* empty */
+      }
+      return r.json().catch(() => ({}));
+    }),
   sessions: {
-    list: (currentJti) =>
-      api(currentJti ? `/auth/sessions/?current_jti=${encodeURIComponent(currentJti)}` : '/auth/sessions/'),
-    register: (refreshToken) =>
+    list: () => api('/auth/sessions/'),
+    register: () =>
       api('/auth/sessions/register/', {
         method: 'POST',
-        body: JSON.stringify({ refresh: refreshToken }),
+        body: JSON.stringify({}),
       }),
     revoke: (jti) =>
       api(`/auth/sessions/${encodeURIComponent(jti)}/revoke/`, { method: 'POST' }),
-    revokeAll: (refreshToken) =>
+    revokeAll: () =>
       api('/auth/sessions/revoke_all/', {
         method: 'POST',
-        body: JSON.stringify({ refresh: refreshToken }),
+        body: JSON.stringify({}),
       }),
   },
 };
+
+/** @internal Used by AuthContext after login/register to store access token */
+export function persistAccessToken(access) {
+  if (access) setAccessToken(access);
+}
+
+export { getAccessToken, clearAccessToken };
 
 /** Public stats for landing page. Returns { place_count } or null on error. */
 export async function getPlaceCount() {
@@ -190,10 +240,17 @@ export const places = {
       method: 'POST',
       body: JSON.stringify({ user_id: userId }),
     }),
+  leave: (placeId) =>
+    api(`/places/${placeId}/leave/`, { method: 'POST' }),
 };
 
 export const placeMembers = (placeId) => ({
   list: () => api(`/places/${placeId}/members/`),
+  remove: (userId) =>
+    api(`/places/${placeId}/members/remove/`, {
+      method: 'POST',
+      body: JSON.stringify({ user_id: userId }),
+    }),
 });
 
 export const categories = (placeId) => ({
@@ -207,7 +264,8 @@ export const categories = (placeId) => ({
 
 export const cycles = (placeId) => ({
   list: () => api(`/places/${placeId}/cycles/`),
-  create: (body) => api(`/places/${placeId}/cycles/`, { method: 'POST', body: JSON.stringify(body) }),
+  create: (body) =>
+    api(`/places/${placeId}/cycles/`, { method: 'POST', body: JSON.stringify(body) }),
   resolve: (cycleId) => api(`/places/${placeId}/cycles/${cycleId}/resolve/`, { method: 'POST' }),
   reopen: (cycleId) => api(`/places/${placeId}/cycles/${cycleId}/reopen/`, { method: 'POST' }),
 });
@@ -222,14 +280,17 @@ export const expenses = (placeId) => ({
     return api(`/places/${placeId}/expenses/${qs ? `?${qs}` : ''}`);
   },
   get: (id) => api(`/places/${placeId}/expenses/${id}/`),
-  create: (body) => api(`/places/${placeId}/expenses/`, { method: 'POST', body: JSON.stringify(body) }),
-  update: (id, body) => api(`/places/${placeId}/expenses/${id}/`, { method: 'PATCH', body: JSON.stringify(body) }),
+  create: (body) =>
+    api(`/places/${placeId}/expenses/`, { method: 'POST', body: JSON.stringify(body) }),
+  update: (id, body) =>
+    api(`/places/${placeId}/expenses/${id}/`, { method: 'PATCH', body: JSON.stringify(body) }),
   delete: (id) => api(`/places/${placeId}/expenses/${id}/`, { method: 'DELETE' }),
 });
 
 export const invites = (placeId) => ({
   list: () => api(`/places/${placeId}/invites/`),
-  create: (email = '') => api(`/places/${placeId}/invites/`, { method: 'POST', body: JSON.stringify({ email: email || '' }) }),
+  create: (email = '') =>
+    api(`/places/${placeId}/invites/`, { method: 'POST', body: JSON.stringify({ email: email || '' }) }),
   delete: (id) => api(`/places/${placeId}/invites/${id}/`, { method: 'DELETE' }),
 });
 

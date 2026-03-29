@@ -567,7 +567,12 @@ export default function Dashboard() {
                       <div className="flex -space-x-2 mt-2">
                         {place.members.slice(0, 4).map((m) => (
                           <span key={m.id} className="inline-block ring-2 ring-base-100 rounded-full">
-                            <UserAvatar username={m.username} displayName={m.display_name} size="xs" />
+                            <UserAvatar
+                              username={m.username}
+                              displayName={m.display_name}
+                              photoUrl={m.profile_photo}
+                              size="xs"
+                            />
                           </span>
                         ))}
                       </div>

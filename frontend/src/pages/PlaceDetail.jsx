@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { useParams, useSearchParams, Link } from 'react-router-dom';
+import { useParams, useSearchParams, useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 import { usePreferences } from '../PreferencesContext';
 import { Skeleton } from '../components/Skeleton';
@@ -7,7 +7,7 @@ import CallyDatePicker from '../components/CallyDatePicker';
 import { places as placesApi, expenses, categories, summary, invites, placeMembers, cycles as cyclesApi, settlements as settlementsApi, settlementCreate } from '../api';
 import {
   Trash2, Pencil, Filter, Calendar, Users, X, Check, ChevronLeft, ChevronRight, ChevronDown, ChevronUp,
-  Scale, Wallet, CircleDollarSign, Clock, TrendingUp, TrendingDown, CheckCircle2, CalendarRange, Info, PlayCircle, RotateCcw,
+  Scale, Wallet, CircleDollarSign, Clock, TrendingUp, TrendingDown, CheckCircle2, CalendarRange, Info, PlayCircle, RotateCcw, AlertTriangle,
   Home, Receipt, Building2, Zap, Droplets, Flame, Wifi, Smartphone, ShoppingCart, Sparkles, Bath, UtensilsCrossed,
   Package, Tv, Music, CreditCard, PartyPopper, CalendarDays, Search, Plus, Copy, Share2, RefreshCw, Loader2,
 } from 'lucide-react';
@@ -68,7 +68,28 @@ function CategoryTypeBadge({ type }) {
   );
 }
 
-const VALID_TABS = ['expenses', 'summary', 'invite'];
+const VALID_TABS = ['expenses', 'summary', 'invite', 'about', 'archive'];
+
+/** Truncate email for display (e.g. san…@gmail.com). */
+function truncateEmail(email) {
+  if (!email || typeof email !== 'string') return email || '';
+  const at = email.indexOf('@');
+  if (at <= 0) return email;
+  const local = email.slice(0, at);
+  const domain = email.slice(at);
+  if (local.length <= 4) return email;
+  return local.slice(0, 3) + '…' + domain;
+}
+
+/** Prefer username/display_name; if missing or email-like, show truncated email. */
+function memberDisplayLabel(m) {
+  const name = (m?.display_name || m?.username || '').trim();
+  const email = (m?.email || '').trim();
+  if (name && !name.includes('@')) return name;
+  if (name && name.includes('@')) return truncateEmail(name);
+  if (email) return truncateEmail(email);
+  return 'Member';
+}
 
 /** Today's date in local time as YYYY-MM-DD (for date inputs; avoids UTC mismatch). */
 function getTodayLocal() {
@@ -237,7 +258,7 @@ export default function PlaceDetail() {
       .get(id)
       .then((p) => {
         setPlace(p);
-        // Then load expenses, summary, members (don't fail the whole page if these fail)
+        // Load expenses, summary, members, cycles before showing content so we don't flash empty state
         Promise.allSettled([
           expenses(id).list({ page: 1, page_size: 10 }),
           selectedCycleId != null
@@ -255,13 +276,29 @@ export default function PlaceDetail() {
             setExpensePage(1);
             setExpenseTotalCount(count);
           }
-          if (sumRes.status === 'fulfilled') setSummaryData(sumRes.value);
           if (memRes.status === 'fulfilled') setMembers(memRes.value);
-          if (cyRes.status === 'fulfilled') setCycleList(Array.isArray(cyRes.value) ? cyRes.value : []);
+          const cycles = cyRes?.status === 'fulfilled' && Array.isArray(cyRes.value) ? cyRes.value : [];
+          if (cycles.length) setCycleList(cycles);
+          // Prefer cycle-based summary on first load when there's an open/pending cycle so hard reload shows cycle view, not period
+          const openCycle = cycles.find((c) => c.status === 'open');
+          const pendingCycle = cycles.find((c) => c.status === 'pending_settlement');
+          const preferredCycle = openCycle || pendingCycle;
+          if (preferredCycle) {
+            setSelectedCycleId(preferredCycle.id);
+            summary(id, { cycle_id: preferredCycle.id })
+              .then(setSummaryData)
+              .catch(() => {})
+              .finally(() => setLoading(false));
+          } else {
+            if (sumRes.status === 'fulfilled') setSummaryData(sumRes.value);
+            setLoading(false);
+          }
         });
       })
-      .catch(() => setPlace(null))
-      .finally(() => setLoading(false));
+      .catch(() => {
+        setPlace(null);
+        setLoading(false);
+      });
   }
 
   function loadExpensesPage(page) {
@@ -364,27 +401,36 @@ export default function PlaceDetail() {
 
   const currentCycle = cycleList.find((c) => c.status === 'open') || null;
 
+  // Resolved cycles live in Archive only; clear Summary selection when the selected cycle is resolved
+  useEffect(() => {
+    if (selectedCycleId == null || cycleList.length === 0) return;
+    const selected = cycleList.find((c) => c.id === selectedCycleId);
+    if (selected?.status !== 'resolved') return;
+    const openOrPending = cycleList.find((c) => c.status === 'open' || c.status === 'pending_settlement');
+    setSelectedCycleId(openOrPending ? openOrPending.id : null); // eslint-disable-line react-hooks/set-state-in-effect
+  }, [cycleList, selectedCycleId]);
+
   useEffect(() => {
     if (cycleList.length === 0) return;
     if (selectedCycleId != null) return;
+    // Prefer open cycle; else pending settlement (so admin can settle and resolve); never auto-select resolved
     if (currentCycle) {
       setSelectedCycleId(currentCycle.id); // eslint-disable-line react-hooks/set-state-in-effect
     } else {
-      setSelectedCycleId(cycleList[0].id);
+      const pending = cycleList.find((c) => c.status === 'pending_settlement');
+      setSelectedCycleId(pending ? pending.id : null);
     }
   }, [cycleList.length, currentCycle?.id, selectedCycleId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (place && tab === 'invite' && !isOwner) {
-      setSearchParams({ tab: 'expenses' });
+    if (tab === 'invite' && id) {
+      if (isOwner) {
+        invites(id).list().then(setInviteList).catch(() => setInviteList([]));
+      } else {
+        setSearchParams({ tab: 'about' }, { replace: true });
+      }
     }
-  }, [place, tab, isOwner, setSearchParams]);
-
-  useEffect(() => {
-    if (tab === 'invite' && id && isOwner) {
-      invites(id).list().then(setInviteList).catch(() => setInviteList([]));
-    }
-  }, [tab, id, isOwner]);
+  }, [tab, id, isOwner, setSearchParams]);
 
   if (loading && !place) {
     return (
@@ -478,6 +524,26 @@ export default function PlaceDetail() {
               Invite
             </button>
           )}
+          {!isOwner && (
+            <button
+              type="button"
+              role="tab"
+              className={`tab ${tab === 'about' ? 'tab-active' : ''}`}
+              onClick={() => setSearchParams({ tab: 'about' })}
+              aria-selected={tab === 'about'}
+            >
+              About
+            </button>
+          )}
+          <button
+            type="button"
+            role="tab"
+            className={`tab ${tab === 'archive' ? 'tab-active' : ''}`}
+            onClick={() => setSearchParams({ tab: 'archive' })}
+            aria-selected={tab === 'archive'}
+          >
+            Archive
+          </button>
         </nav>
 
       {tab === 'expenses' && (
@@ -511,11 +577,16 @@ export default function PlaceDetail() {
           currentCycle={currentCycle}
           selectedCycleId={selectedCycleId}
           setSelectedCycleId={setSelectedCycleId}
-          onResolveCycle={(cycleId) => cyclesApi(id).resolve(cycleId).then(load)}
-          onReopenCycle={(cycleId) => cyclesApi(id).reopen(cycleId).then(load)}
-          onStartNewCycle={() =>
+          onResolveCycle={(cycleId) =>
             cyclesApi(id)
-              .create({})
+              .resolve(cycleId)
+              .then(load)
+              .then(() => setSelectedCycleId(null))
+              .catch(() => {})
+            }
+          onStartNewCycle={(startDate) =>
+            cyclesApi(id)
+              .create(startDate ? { start_date: startDate } : {})
               .then((cycle) => {
                 setCycleList((prev) => [cycle, ...prev]);
                 setSelectedCycleId(cycle.id);
@@ -539,9 +610,32 @@ export default function PlaceDetail() {
           inviteEmail={inviteEmail}
           setInviteEmail={setInviteEmail}
           inviteList={inviteList}
-          onRefresh={() => invites(id).list().then(setInviteList)}
+          onRefresh={() => {
+            invites(id).list().then(setInviteList);
+            load();
+          }}
           members={members}
           currentUserId={user?.id}
+          isOwner={isOwner}
+        />
+      )}
+      {tab === 'about' && !isOwner && (
+        <AboutPlaceSection
+          placeId={id}
+          placeName={place?.name}
+          members={members}
+          currentUserId={user?.id}
+          onRefresh={load}
+        />
+      )}
+      {tab === 'archive' && (
+        <ArchiveSection
+          placeId={id}
+          placeName={place?.name}
+          cycleList={cycleList}
+          members={members}
+          currentUserId={user?.id}
+          currency={currency}
         />
       )}
     </div>
@@ -565,7 +659,8 @@ function Avatar({ username, photoUrl, className = '' }) {
 }
 
 function ExpenseCard({ expense, placeId, members: _members, currentUser, isOwner, onRefresh, onEdit, currency }) {
-  const canEdit = isOwner || (expense.added_by?.id === currentUser?.id);
+  const addedById = expense.added_by?.id ?? expense.added_by?.user_id;
+  const canEdit = isOwner || addedById === currentUser?.id;
   const sym = currency?.symbol ?? '$';
   const [swipeOffset, setSwipeOffset] = useState(0);
   const [detailOpen, setDetailOpen] = useState(false);
@@ -752,25 +847,25 @@ function ExpenseCard({ expense, placeId, members: _members, currentUser, isOwner
 
       {detailOpen && (
         <div
-          className="fixed inset-0 z-30 flex items-end sm:items-center justify-center bg-black/50"
+          className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50"
           onClick={() => setDetailOpen(false)}
           role="dialog"
           aria-modal="true"
           aria-labelledby="expense-detail-title"
         >
           <div
-            className="bg-base-200 border border-base-300 rounded-t-2xl sm:rounded-2xl w-full max-w-md max-h-[85vh] overflow-y-auto shadow-xl relative"
+            className="bg-base-200 border border-base-300 rounded-t-2xl sm:rounded-2xl w-full max-w-md max-h-[85vh] flex flex-col min-h-0 shadow-xl relative"
             onClick={(e) => e.stopPropagation()}
           >
             <button
               type="button"
               onClick={() => setDetailOpen(false)}
-              className="absolute top-4 right-4 btn btn-ghost btn-circle btn-sm text-text-secondary hover:text-text-primary hover:bg-base-300"
+              className="absolute top-4 right-4 btn btn-ghost btn-circle btn-sm text-text-secondary hover:text-text-primary hover:bg-base-300 z-10"
               aria-label="Close"
             >
               <X className="w-5 h-5" aria-hidden />
             </button>
-            <div className="p-6 sm:p-8 pt-10 sm:pt-10">
+            <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-6 sm:p-8 pt-10 sm:pt-10">
               <p className="text-3xl font-bold text-primary tabular-nums m-0 mb-5">{amountStr}</p>
               <div className="flex flex-wrap items-center gap-3 mb-6">
                 <h2 id="expense-detail-title" className="text-lg font-semibold text-text-primary m-0">{expense.description}</h2>
@@ -799,7 +894,7 @@ function ExpenseCard({ expense, placeId, members: _members, currentUser, isOwner
                 )}
               </div>
               {expense.splits?.length > 0 && (
-                <div className="mb-8">
+                <div className="mb-4">
                   <p className="text-xs font-medium text-text-muted uppercase tracking-wide m-0 mb-3">Split between</p>
                   <div className="flex flex-wrap gap-4">
                     {expense.splits.map((s) => (
@@ -811,17 +906,17 @@ function ExpenseCard({ expense, placeId, members: _members, currentUser, isOwner
                   </div>
                 </div>
               )}
-              {canEdit && (
-                <div className="flex gap-3 pt-2">
-                  <button type="button" className="btn btn-outline flex-1 min-h-11 rounded-lg border-base-300 gap-2" onClick={() => { setDetailOpen(false); onEdit?.(expense); }}>
-                    <Pencil className="w-4 h-4 shrink-0" aria-hidden /> Edit
-                  </button>
-                  <button type="button" className="btn btn-error flex-1 min-h-11 rounded-lg shadow-soft gap-2" onClick={handleDeleteFromModal} disabled={deleting}>
-                    <Trash2 className="w-4 h-4 shrink-0" aria-hidden /> {deleting ? 'Deleting…' : 'Delete'}
-                  </button>
-                </div>
-              )}
             </div>
+            {canEdit && (
+              <div className="shrink-0 flex gap-3 p-4 sm:p-6 pt-3 border-t border-base-300 bg-base-200 rounded-b-2xl sm:rounded-b-2xl">
+                <button type="button" className="btn btn-outline flex-1 min-h-11 rounded-lg border-base-300 gap-2" onClick={() => { setDetailOpen(false); onEdit?.(expense); }}>
+                  <Pencil className="w-4 h-4 shrink-0" aria-hidden /> Edit
+                </button>
+                <button type="button" className="btn btn-error flex-1 min-h-11 rounded-lg shadow-soft gap-2" onClick={handleDeleteFromModal} disabled={deleting}>
+                  <Trash2 className="w-4 h-4 shrink-0" aria-hidden /> {deleting ? 'Deleting…' : 'Delete'}
+                </button>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -833,7 +928,7 @@ function ExpensesSection({ placeId, place, expenseList, expensePage, expenseTota
   const [showForm, setShowForm] = useState(false);
   const [editingExpense, setEditingExpense] = useState(null);
   const [filterCategory, setFilterCategory] = useState('');
-  const [filterPaidBy, setFilterPaidBy] = useState(''); // '' = anyone, 'me' = current user, or member user id
+  const [filterPaidBy, setFilterPaidBy] = useState(''); // '' = anyone, else member user id string
   const [filterOnlyWhereImInSplit, setFilterOnlyWhereImInSplit] = useState(false);
   const [showFiltersPanel, setShowFiltersPanel] = useState(false);
   const [categoryList, setCategoryList] = useState([]);
@@ -853,9 +948,7 @@ function ExpensesSection({ placeId, place, expenseList, expensePage, expenseTota
     if (filterCategory && (exp.category?.id != null ? String(exp.category.id) : '') !== filterCategory) return false;
     if (filterPaidBy) {
       const paidById = exp.paid_by?.id ?? exp.paid_by;
-      if (filterPaidBy === 'me') {
-        if (paidById !== currentUser?.id) return false;
-      } else if (String(paidById) !== filterPaidBy) return false;
+      if (String(paidById) !== filterPaidBy) return false;
     }
     if (filterOnlyWhereImInSplit && currentUser?.id != null) {
       const splitUserIds = (exp.splits ?? []).map((s) => s.user?.id ?? s.user).filter(Boolean);
@@ -950,7 +1043,6 @@ function ExpensesSection({ placeId, place, expenseList, expensePage, expenseTota
           </select>
             <select value={filterPaidBy} onChange={(e) => setFilterPaidBy(e.target.value)} className="select select-bordered select-sm flex-1 min-w-0 rounded-full" aria-label="Filter by who paid">
             <option value="">Paid by: anyone</option>
-            <option value="me">Paid by: me</option>
             {members.map((m) => (
               <option key={m.id} value={String(m.user?.id)}>
                 Paid by: {m.user?.display_name || m.user?.username || 'Member'}
@@ -1551,6 +1643,67 @@ function subDays(iso, days) {
   return d.toISOString().slice(0, 10);
 }
 
+const SETTLEMENT_NOTE_COUNTS_KEY = 'equilo_settlement_note_counts_v1';
+const DEFAULT_SETTLEMENT_NOTE_QUICK_OPTIONS = ['PayID', 'Cash', 'Bank Transfer'];
+const MAX_SETTLEMENT_NOTE_QUICK_OPTIONS = 3;
+
+function readSettlementNoteCounts() {
+  try {
+    const raw = localStorage.getItem(SETTLEMENT_NOTE_COUNTS_KEY);
+    if (!raw) return {};
+    const o = JSON.parse(raw);
+    if (!o || typeof o !== 'object' || Array.isArray(o)) return {};
+    return o;
+  } catch {
+    return {};
+  }
+}
+
+function writeSettlementNoteCounts(counts) {
+  try {
+    localStorage.setItem(SETTLEMENT_NOTE_COUNTS_KEY, JSON.stringify(counts));
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
+/** After a successful settlement, bump count for this note (non-empty trimmed). */
+function recordSettlementNoteUsage(note) {
+  const key = (note || '').trim();
+  if (!key || key.length > 80) return;
+  const counts = readSettlementNoteCounts();
+  counts[key] = (Number(counts[key]) || 0) + 1;
+  writeSettlementNoteCounts(counts);
+}
+
+/**
+ * Quick-fill chips for settlement notes: up to 3 labels.
+ * Uses most-used notes from this browser, then pads with defaults (PayID, Cash, Bank Transfer).
+ * Swap to server-side or richer analytics later if needed.
+ */
+function getSettlementNoteQuickOptions() {
+  const counts = readSettlementNoteCounts();
+  const ranked = Object.entries(counts)
+    .filter(([label]) => typeof label === 'string' && label.trim().length > 0)
+    .sort((a, b) => (Number(b[1]) || 0) - (Number(a[1]) || 0))
+    .map(([label]) => label.trim());
+  const seen = new Set();
+  const out = [];
+  for (const label of ranked) {
+    if (seen.has(label)) continue;
+    seen.add(label);
+    out.push(label);
+    if (out.length >= MAX_SETTLEMENT_NOTE_QUICK_OPTIONS) return out;
+  }
+  for (const d of DEFAULT_SETTLEMENT_NOTE_QUICK_OPTIONS) {
+    if (seen.has(d)) continue;
+    seen.add(d);
+    out.push(d);
+    if (out.length >= MAX_SETTLEMENT_NOTE_QUICK_OPTIONS) break;
+  }
+  return out;
+}
+
 function SummarySection({
   data,
   period,
@@ -1562,7 +1715,6 @@ function SummarySection({
   selectedCycleId = null,
   setSelectedCycleId,
   onResolveCycle,
-  onReopenCycle,
   onStartNewCycle,
   members: _members,
   currentUserId,
@@ -1582,7 +1734,10 @@ function SummarySection({
   const canGoNext = !isCycleMode && data.to && data.to < today;
   const periodDays = period === 'fortnightly' ? 14 : 7;
   const selectedCycle = cycleList.find((c) => c.id === selectedCycleId);
-  const canResolve = selectedCycle?.status === 'open';
+  const allSettled = data?.all_settled === true;
+  const isOpenCycle = selectedCycle?.status === 'open';
+  const isPendingSettlement = selectedCycle?.status === 'pending_settlement';
+  const canResolve = (isOpenCycle || isPendingSettlement) && allSettled;
 
   const handlePrevPeriod = () => {
     if (!data.from) return;
@@ -1609,13 +1764,14 @@ function SummarySection({
   const [contributionExpanded, setContributionExpanded] = useState(false);
   const whoOwesMe = memberList.filter((m) => m.balance < 0);
   const [requestingUserId, setRequestingUserId] = useState(null);
+  const [requestSentUserId, setRequestSentUserId] = useState(null);
   const [_requestErrors, setRequestErrors] = useState({});
   const [globalRequestError, setGlobalRequestError] = useState('');
   const [showStartCycleConfirm, setShowStartCycleConfirm] = useState(false);
+  const [newCycleStartDate, setNewCycleStartDate] = useState(() => new Date().toISOString().slice(0, 10));
   const [startCycleLoading, setStartCycleLoading] = useState(false);
   const [startCycleError, setStartCycleError] = useState('');
   const [showResolveCycleConfirm, setShowResolveCycleConfirm] = useState(false);
-  const [showReopenCycleConfirm, setShowReopenCycleConfirm] = useState(false);
   const [showSettleModal, setShowSettleModal] = useState(false);
   const [settleTarget, setSettleTarget] = useState(null); // optional: pre-selected recipient (from "Settle" button)
   const [settleFromUserId, setSettleFromUserId] = useState(''); // payer; defaults to current user
@@ -1666,9 +1822,12 @@ function SummarySection({
   async function handleRequestPayment(userId) {
     if (!placeId || !userId) return;
     setRequestErrors((prev) => ({ ...prev, [userId]: '' }));
+    setGlobalRequestError('');
     setRequestingUserId(userId);
     try {
       await placesApi.requestPayment(placeId, userId);
+      setRequestSentUserId(userId);
+      window.setTimeout(() => setRequestSentUserId(null), 3000);
     } catch (err) {
       const msg =
         err?.error ||
@@ -1730,7 +1889,8 @@ function SummarySection({
   async function handleSettleConfirm() {
     if (!placeId) return;
     const fromUserId = settleFromUserId ? Number(settleFromUserId) : currentUserId;
-    const toUserId = settleTarget?.user_id ?? (settleToUserId ? Number(settleToUserId) : null);
+    // Recipient is what's in the Recipient field (settleToUserId); settleTarget is the "other" member, not necessarily the recipient
+    const toUserId = settleToUserId ? Number(settleToUserId) : null;
     if (!fromUserId) {
       setSettleError('Select a payer');
       return;
@@ -1758,13 +1918,22 @@ function SummarySection({
         amount,
         date: settleDate,
         note: settleNote.trim() || undefined,
+        ...(selectedCycleId ? { cycle_id: selectedCycleId } : {}),
       });
+      if (settleNote.trim()) recordSettlementNoteUsage(settleNote);
       closeSettleModal();
       if (onRefreshSummary) onRefreshSummary();
       settlementsApi(placeId).list().then((res) => setSettlementList(res.results ?? []));
     } catch (err) {
-      const msg = err?.error ?? err?.detail ?? (Array.isArray(err?.detail) ? err.detail[0] : '') ?? err?.message ?? 'Failed to record settlement';
+      let msg = err?.error ?? err?.detail ?? (Array.isArray(err?.detail) ? err.detail[0] : '') ?? err?.message ?? 'Failed to record settlement';
+      const str = String(msg || '').toLowerCase();
+      if ((str.includes('do not owe') || str.includes('does not owe')) && str.includes('cycle')) {
+        msg = `${msg} To record that they paid you, use the "Settle" button next to their name in Member balances.`;
+      }
       setSettleError(msg);
+      if (typeof err?.max_amount === 'number' && err.max_amount >= 0) {
+        setSettleAmount(String(err.max_amount.toFixed(2)));
+      }
     } finally {
       setSettleLoading(false);
     }
@@ -1781,7 +1950,7 @@ function SummarySection({
         <div className="rounded-xl border border-primary/20 bg-primary/5 p-4 mb-6">
           <p className="text-sm text-base-content/80 m-0 mb-3">Track expenses by cycle (e.g. fortnightly or monthly). Resolve when you settle up, then start a new cycle.</p>
           {isPlaceCreator && (
-            <button type="button" className="btn btn-primary min-h-11 rounded-lg shadow-soft px-4" onClick={() => onStartNewCycle?.()}>
+            <button type="button" className="btn btn-primary min-h-11 rounded-lg shadow-soft px-4" onClick={() => { setStartCycleError(''); setNewCycleStartDate(todayIso); setShowStartCycleConfirm(true); }}>
               Start your first cycle
             </button>
           )}
@@ -1798,164 +1967,61 @@ function SummarySection({
               id="summary-cycle"
               className="select select-bordered w-full sm:max-w-xs min-h-11 rounded-lg border-base-300"
               value={selectedCycleId ?? ''}
-              onChange={(e) => setSelectedCycleId?.(e.target.value ? Number(e.target.value) : null)}
+              onChange={(e) => setSelectedCycleId(e.target.value ? Number(e.target.value) : null)}
             >
-              {cycleList.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name || `${c.start_date} – ${c.end_date}`} {c.status === 'resolved' ? '(resolved)' : '(current)'}
-                </option>
-              ))}
+              {(() => {
+                const activeCycles = cycleList.filter((c) => c.status === 'open' || c.status === 'pending_settlement');
+                if (activeCycles.length === 0) {
+                  return <option value="">No active cycle</option>;
+                }
+                return activeCycles.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name || `${c.start_date} – ${c.end_date}`} {c.status === 'open' ? '(current)' : '(pending settlement)'}
+                  </option>
+                ));
+              })()}
             </select>
           </div>
           <div className="flex flex-wrap gap-2">
-            {isPlaceCreator && canResolve && (
-              <button type="button" className="btn btn-outline min-h-11 rounded-lg border-base-300 flex-1 min-w-[calc(50%-4px)] sm:min-w-0 sm:flex-initial" onClick={() => setShowResolveCycleConfirm(true)}>
+            {isPlaceCreator && (isOpenCycle || isPendingSettlement) && (
+              <button
+                type="button"
+                className="btn btn-outline min-h-11 rounded-lg border-base-300 flex-1 min-w-[calc(50%-4px)] sm:min-w-0 sm:flex-initial"
+                onClick={() => canResolve && setShowResolveCycleConfirm(true)}
+                disabled={!canResolve}
+                title={canResolve ? 'Close this cycle and move to archive' : 'Settle all balances first'}
+              >
                 Resolve this cycle
               </button>
             )}
-            {isPlaceCreator && selectedCycle?.status === 'resolved' && (
-              <button type="button" className="btn btn-ghost min-h-11 rounded-lg flex-1 min-w-[calc(50%-4px)] sm:min-w-0 sm:flex-initial" onClick={() => setShowReopenCycleConfirm(true)} title="Make this cycle current again">
-                <RotateCcw className="h-4 w-4 mr-1 shrink-0" aria-hidden />
-                Reopen this cycle
-              </button>
-            )}
-            {isPlaceCreator && (
-              <button type="button" className="btn btn-primary min-h-11 rounded-lg shadow-soft px-4 flex-1 min-w-[calc(50%-4px)] sm:min-w-0 sm:flex-initial" onClick={() => { setStartCycleError(''); setShowStartCycleConfirm(true); }}>
+            {isPlaceCreator && !isOpenCycle && (
+              <button type="button" className="btn btn-primary min-h-11 rounded-lg shadow-soft px-4 flex-1 min-w-[calc(50%-4px)] sm:min-w-0 sm:flex-initial" onClick={() => { setStartCycleError(''); setNewCycleStartDate(todayIso); setShowStartCycleConfirm(true); }}>
                 Start new cycle
               </button>
             )}
           </div>
-          {!isPlaceCreator && (
+            {!isPlaceCreator && (
             <p className="text-sm text-base-content/60 sm:w-full">Only the place creator can resolve or start a new cycle.</p>
+          )}
+          {isPendingSettlement && (
+            <div className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-sm text-base-content/90 w-full">
+              This cycle has ended. Record settlements until all balances are zero, then click Resolve this cycle to move it to archive.
+            </div>
           )}
         </div>
       )}
 
-      {/* Start new cycle confirmation dialog */}
-      {showStartCycleConfirm && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="start-cycle-dialog-title"
-          onClick={() => setShowStartCycleConfirm(false)}
-        >
-          <div
-            className="bg-base-100 border border-base-300 rounded-2xl shadow-xl w-full max-w-md overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="p-6">
-              <div className="flex items-start gap-3 mb-4">
-                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary" aria-hidden>
-                  <PlayCircle className="h-6 w-6" />
-                </span>
-                <div>
-                  <h3 id="start-cycle-dialog-title" className="text-lg font-semibold text-base-content m-0">Start new cycle?</h3>
-                  <p className="text-sm text-base-content/70 m-0 mt-0.5">Begin a fresh tracking period</p>
-                </div>
-              </div>
-              <div className="space-y-4 text-sm">
-                <div className="flex gap-3 rounded-xl bg-base-200/80 p-3">
-                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden>
-                    <CalendarRange className="h-4 w-4" />
-                  </span>
-                  <div className="min-w-0">
-                    <p className="font-medium text-base-content/80 m-0 mb-0.5">Current cycle</p>
-                    <p className="text-base-content font-medium m-0">{currentCycleName}</p>
-                    <p className="text-base-content/70 m-0 mt-1 flex items-center gap-1.5">
-                      <Scale className="h-3.5 w-3.5 shrink-0" aria-hidden />
-                      Total: {sym}{totalExpense.toFixed(2)} · {balanceStatus}
-                    </p>
-                  </div>
-                </div>
-                <div className="flex gap-3 rounded-xl bg-primary/5 border border-primary/20 p-3">
-                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary" aria-hidden>
-                    <Calendar className="h-4 w-4" />
-                  </span>
-                  <div className="min-w-0">
-                    <p className="font-medium text-base-content/80 m-0 mb-0.5">New cycle</p>
-                    <p className="text-base-content font-medium m-0">{nextCycleRangeStr || 'Next 14 days from day after current cycle ends'}</p>
-                    {nextCycleNote && (
-                      <p className="text-warning text-xs m-0 mt-1 flex items-center gap-1">
-                        <Info className="h-3.5 w-3.5 shrink-0" aria-hidden />
-                        {nextCycleNote}
-                      </p>
-                    )}
-                  </div>
-                </div>
-                {currentCycle && (
-                  <div className="flex gap-2 rounded-lg border border-base-300 bg-base-200/50 px-3 py-2.5">
-                    <Info className="h-4 w-4 shrink-0 text-primary/80 mt-0.5" aria-hidden />
-                    <p className="text-base-content/70 m-0 text-sm leading-snug">
-                      The current cycle will be closed. New expenses will be added to the new cycle.
-                    </p>
-                  </div>
-                )}
-                {startCycleError && (
-                  <div className="rounded-lg border border-error/30 bg-error/10 px-3 py-2.5 text-sm text-error">
-                    {startCycleError}
-                  </div>
-                )}
-              </div>
-            </div>
-            <div className="flex gap-3 p-4 border-t border-base-300 bg-base-200/50">
-              <button
-                type="button"
-                className="btn btn-ghost flex-1"
-                onClick={() => { setShowStartCycleConfirm(false); setStartCycleError(''); }}
-                disabled={startCycleLoading}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="btn btn-primary flex-1"
-                disabled={startCycleLoading}
-                onClick={() => {
-                  setStartCycleError('');
-                  setStartCycleLoading(true);
-                  const p = onStartNewCycle?.();
-                  if (p && typeof p.then === 'function') {
-                    p.then(() => {
-                      setShowStartCycleConfirm(false);
-                    }).catch((err) => {
-                      let msg = err?.detail ?? err?.message;
-                      if (msg == null && typeof err === 'object' && !Array.isArray(err)) {
-                        const parts = [];
-                        for (const [k, v] of Object.entries(err)) {
-                          if (k === 'status') continue;
-                          const s = Array.isArray(v) ? v.join(' ') : String(v);
-                          if (s) parts.push(k === 'detail' ? s : `${k}: ${s}`);
-                        }
-                        msg = parts.length ? parts.join(' ') : null;
-                      }
-                      if (msg == null || msg === '') msg = 'Failed to start new cycle';
-                      setStartCycleError(Array.isArray(msg) ? msg[0] : msg);
-                    }).finally(() => setStartCycleLoading(false));
-                  } else {
-                    setShowStartCycleConfirm(false);
-                    setStartCycleLoading(false);
-                  }
-                }}
-              >
-                {startCycleLoading ? (
-                  <>
-                    <span className="loading loading-spinner loading-sm" aria-hidden />
-                    Starting…
-                  </>
-                ) : (
-                  <>
-                    <PlayCircle className="h-4 w-4 mr-1.5 shrink-0" aria-hidden />
-                    Start new cycle
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
+      {/* When no active cycle selected, show brand-new empty state (no older data) */}
+      {cycleList.length > 0 && selectedCycleId == null && (
+        <div className="rounded-xl border border-base-300 p-8 text-center bg-gradient-to-br from-base-100 to-base-200/50">
+          <p className="text-base-content/80 m-0 mb-1">No active cycle</p>
+          <p className="text-sm text-base-content/60 m-0">Start a new cycle to begin tracking expenses for this place.</p>
         </div>
       )}
 
-      {/* Resolve cycle confirmation dialog */}
+      {selectedCycleId != null && (
+        <>
+      {/* Three summary cards in one row */}
       {showResolveCycleConfirm && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
@@ -1975,7 +2041,7 @@ function SummarySection({
                 </span>
                 <div>
                   <h3 id="resolve-cycle-dialog-title" className="text-lg font-semibold text-base-content m-0">Resolve this cycle?</h3>
-                  <p className="text-sm text-base-content/70 m-0 mt-0.5">Close this period and settle up</p>
+                  <p className="text-sm text-base-content/70 m-0 mt-0.5">All balances are settled. Close this period and move to archive.</p>
                 </div>
               </div>
               <div className="space-y-4 text-sm">
@@ -1995,7 +2061,7 @@ function SummarySection({
                 <div className="flex gap-2 rounded-lg border border-base-300 bg-base-200/50 px-3 py-2.5">
                   <Info className="h-4 w-4 shrink-0 text-primary/80 mt-0.5" aria-hidden />
                   <p className="text-base-content/70 m-0 text-sm leading-snug">
-                    Resolving closes this cycle. You can still view it in the list, but no new expenses can be added to it. Start a new cycle to continue tracking.
+                    This cycle will move to Archive. You can then start a new cycle from today.
                   </p>
                 </div>
               </div>
@@ -2018,73 +2084,6 @@ function SummarySection({
               >
                 <Check className="h-4 w-4 mr-1.5 shrink-0" aria-hidden />
                 Resolve cycle
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Reopen cycle confirmation dialog (undo accidental resolve) */}
-      {showReopenCycleConfirm && selectedCycle && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="reopen-cycle-dialog-title"
-          onClick={() => setShowReopenCycleConfirm(false)}
-        >
-          <div
-            className="bg-base-100 border border-base-300 rounded-2xl shadow-xl w-full max-w-md overflow-hidden"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="p-6">
-              <div className="flex items-start gap-3 mb-4">
-                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary" aria-hidden>
-                  <RotateCcw className="h-6 w-6" />
-                </span>
-                <div>
-                  <h3 id="reopen-cycle-dialog-title" className="text-lg font-semibold text-base-content m-0">Reopen this cycle?</h3>
-                  <p className="text-sm text-base-content/70 m-0 mt-0.5">Make it the current cycle again so you can add or edit expenses in this period</p>
-                </div>
-              </div>
-              <div className="space-y-4 text-sm">
-                <div className="flex gap-3 rounded-xl bg-base-200/80 p-3">
-                  <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden>
-                    <CalendarRange className="h-4 w-4" />
-                  </span>
-                  <div className="min-w-0">
-                    <p className="font-medium text-base-content/80 m-0 mb-0.5">Cycle</p>
-                    <p className="text-base-content font-medium m-0">{currentCycleName}</p>
-                  </div>
-                </div>
-                <div className="flex gap-2 rounded-lg border border-base-300 bg-base-200/50 px-3 py-2.5">
-                  <Info className="h-4 w-4 shrink-0 text-primary/80 mt-0.5" aria-hidden />
-                  <p className="text-base-content/70 m-0 text-sm leading-snug">
-                    {currentCycle
-                      ? 'The current cycle will be closed and this one will become active again. You can add or edit expenses in this period.'
-                      : 'This cycle will become the current one. Useful if you resolved by mistake—you can continue adding expenses to it.'}
-                  </p>
-                </div>
-              </div>
-            </div>
-            <div className="flex gap-3 p-4 border-t border-base-300 bg-base-200/50">
-              <button
-                type="button"
-                className="btn btn-ghost flex-1"
-                onClick={() => setShowReopenCycleConfirm(false)}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="btn btn-primary flex-1"
-                onClick={() => {
-                  setShowReopenCycleConfirm(false);
-                  onReopenCycle?.(selectedCycleId);
-                }}
-              >
-                <RotateCcw className="h-4 w-4 mr-1.5 shrink-0" aria-hidden />
-                Reopen cycle
               </button>
             </div>
           </div>
@@ -2364,6 +2363,19 @@ function SummarySection({
                     onChange={(e) => setSettleNote(e.target.value)}
                     disabled={settleLoading}
                   />
+                  <div className="flex flex-wrap gap-2 mt-2" role="group" aria-label="Quick note options">
+                    {getSettlementNoteQuickOptions().map((label) => (
+                      <button
+                        key={label}
+                        type="button"
+                        className="btn btn-sm btn-outline border-base-300 rounded-full min-h-8 h-8 px-3 text-xs font-medium"
+                        disabled={settleLoading}
+                        onClick={() => setSettleNote(label)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 {settleError && <p className="text-sm text-error m-0">{settleError}</p>}
@@ -2402,27 +2414,30 @@ function SummarySection({
       )}
 
       {/* Three summary cards in one row */}
+      {(() => {
+        const netBalanceDisplay = Math.abs(netBalance) < 0.005 ? 0 : netBalance;
+        return (
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
         <div
           className={`rounded-xl border p-4 shadow-[0_2px_10px_rgba(0,0,0,0.04)] ${
-            netBalance >= 0
+            netBalanceDisplay >= 0
               ? 'border-primary/20 bg-gradient-to-br from-primary/10 via-primary/[0.07] to-primary/5'
               : 'border-error/20 bg-gradient-to-br from-error/10 via-error/[0.07] to-error/5'
           }`}
         >
           <div className="flex items-center gap-2 mb-2">
-            <span className={`flex h-8 w-8 items-center justify-center rounded-lg shrink-0 ${netBalance >= 0 ? 'bg-primary/15 text-primary' : 'bg-error/15 text-error'}`} aria-hidden>
+            <span className={`flex h-8 w-8 items-center justify-center rounded-lg shrink-0 ${netBalanceDisplay >= 0 ? 'bg-primary/15 text-primary' : 'bg-error/15 text-error'}`} aria-hidden>
               <Scale className="h-4 w-4" />
             </span>
             <h3 className="text-sm font-medium text-base-content/70 m-0">Net balance</h3>
           </div>
-          <p className={`text-2xl font-bold m-0 ${netBalance >= 0 ? 'text-primary' : 'text-error'}`}>
-            {netBalance >= 0 ? '+' : ''}{sym}{netBalance.toFixed(2)}
+          <p className={`text-2xl font-bold m-0 ${netBalanceDisplay >= 0 ? 'text-primary' : 'text-error'}`}>
+            {netBalanceDisplay >= 0 ? '+' : ''}{sym}{netBalanceDisplay.toFixed(2)}
           </p>
           <p className="text-sm text-base-content/60 m-0 mt-1">
-            {netBalance > 0 ? 'You are owed more than you owe.' : netBalance < 0 ? 'You owe more than you are owed.' : 'You are settled.'}
+            {netBalanceDisplay > 0 ? 'You are owed more than you owe.' : netBalanceDisplay < 0 ? 'You owe more than you are owed.' : 'You are settled.'}
           </p>
-          {netBalance > 0 && (
+          {netBalanceDisplay > 0 && (
             <p className="text-xs text-primary font-medium flex items-center gap-2 mt-2">
               <span className="flex items-center justify-center w-5 h-5 rounded-full bg-primary text-white shrink-0" aria-hidden>
                 <Check className="w-3 h-3" strokeWidth={3} />
@@ -2492,8 +2507,8 @@ function SummarySection({
                 {whoOwesMe.length > 0 && (
                   <ul className="ml-11 mt-2 list-none space-y-1 pl-0 text-xs text-base-content/60">
                     {whoOwesMe.map((m) => (
-                      <li key={m.user_id}>
-                        {(m.display_name || m.username)} owes {sym}{Math.abs(m.balance).toFixed(2)}
+                      <li key={m.user_id} className="truncate">
+                        {memberDisplayLabel(m)} owes {sym}{Math.abs(m.balance).toFixed(2)}
                       </li>
                     ))}
                   </ul>
@@ -2513,6 +2528,8 @@ function SummarySection({
           <p className="text-sm text-base-content/60 m-0 mt-1">{rangeStr}</p>
         </div>
       </div>
+        );
+      })()}
 
       {/* Period selection (only when not using cycles) */}
       {!isCycleMode && (
@@ -2703,7 +2720,7 @@ function SummarySection({
                     >
                       <span className="flex min-w-0 flex-1 items-start gap-3">
                         <span className="relative shrink-0">
-                          <Avatar username={m.display_name || m.username} photoUrl={m.profile_photo} />
+                          <Avatar username={memberDisplayLabel(m)} photoUrl={m.profile_photo} />
                           <span
                             className={`absolute -bottom-0.5 -right-0.5 flex h-4 w-4 items-center justify-center rounded-full border-2 border-base-100 text-white ${
                               owesMe ? 'bg-primary' : 'bg-base-content/60'
@@ -2714,7 +2731,7 @@ function SummarySection({
                           </span>
                         </span>
                         <span className="flex min-w-0 flex-col gap-1">
-                          <span className="text-sm font-medium text-base-content">{m.display_name || m.username}</span>
+                          <span className="text-sm font-medium text-base-content truncate" title={m.display_name || m.username || m.email}>{memberDisplayLabel(m)}</span>
                           <span
                             className={`inline-flex w-fit rounded-full border px-2.5 py-0.5 text-xs font-medium ${
                               owesMe
@@ -2791,30 +2808,37 @@ function SummarySection({
               <ul className="list-none p-0 m-0 space-y-4">
                 {memberList.map((m) => {
                   const owesMe = m.balance < 0;
-                  const absBal = Math.abs(m.balance);
+                  const absBal = Math.abs(Number(m.balance));
+                  const isSettled = absBal < 0.005;
                   const isRequesting = requestingUserId === m.user_id;
+                  const requestSent = requestSentUserId === m.user_id;
+                  const buttonLabel = owesMe
+                    ? (isRequesting ? 'Requesting…' : requestSent ? 'Request sent' : 'Request payment')
+                    : 'Settle';
                   return (
                     <li key={m.user_id} className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
-                      <span className="flex items-center gap-2">
-                        <Avatar username={m.display_name || m.username} photoUrl={m.profile_photo} />
-                        <span className="font-medium text-base-content">{m.display_name || m.username}</span>
+                      <span className="flex min-w-0 items-center gap-2">
+                        <Avatar username={memberDisplayLabel(m)} photoUrl={m.profile_photo} />
+                        <span className="font-medium text-base-content truncate" title={m.display_name || m.username || m.email}>{memberDisplayLabel(m)}</span>
                       </span>
-                      <div className="flex items-center gap-3 sm:justify-end">
+                      <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 sm:gap-3">
                         <span className="font-medium text-base-content tabular-nums">
                           {sym}{absBal.toFixed(2)}
                         </span>
-                        {absBal > 0 && (
+                        {!isSettled && (
                           <button
                             type="button"
                             className={`btn min-h-11 rounded-lg gap-2 px-4 ${
-                              owesMe
-                                ? 'btn-primary shadow-soft'
-                                : 'btn-outline border-base-300'
+                              requestSent
+                                ? 'btn-success'
+                                : owesMe
+                                  ? 'btn-primary shadow-soft'
+                                  : 'btn-outline border-base-300'
                             }`}
-                            disabled={owesMe ? isRequesting : false}
+                            disabled={owesMe ? (isRequesting || requestSent) : false}
                             onClick={() => owesMe ? handleRequestPayment(m.user_id) : openSettleModal(m)}
                           >
-                            {owesMe ? (isRequesting ? 'Sending…' : 'Request payment') : 'Settle'}
+                            {buttonLabel}
                           </button>
                         )}
                       </div>
@@ -2831,40 +2855,348 @@ function SummarySection({
           )}
         </div>
       </div>
+        </>
+      )}
 
-      {/* Settlement history */}
-      {settlementList.length > 0 && (
-        <div className="mt-6 rounded-xl border border-base-300 p-4 bg-gradient-to-br from-base-100 to-base-200/80 shadow-[0_2px_10px_rgba(0,0,0,0.04)]">
-          <h3 className="text-base font-semibold text-base-content m-0 mb-3">Settlement history</h3>
-          <p className="text-sm text-base-content/60 m-0 mb-3">Payments recorded in this place.</p>
-          <ul className="list-none p-0 m-0 space-y-2">
-            {settlementList.map((s) => (
-              <li key={s.id} className="flex flex-wrap items-center justify-between gap-2 py-2 border-b border-base-200 last:border-b-0 last:pb-0">
-                <span className="text-sm text-base-content">
-                  <span className="font-medium">{s.from_user_display_name || 'Someone'}</span>
-                  {' paid '}
-                  <span className="font-medium">{s.to_user_display_name || 'Someone'}</span>
-                  {' '}{sym}{Number(s.amount).toFixed(2)}
+      {/* Start new cycle confirmation dialog - outside selectedCycleId so it opens when "No active cycle" */}
+      {showStartCycleConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="start-cycle-dialog-title"
+          onClick={() => setShowStartCycleConfirm(false)}
+        >
+          <div
+            className="bg-base-100 border border-base-300 rounded-2xl shadow-xl w-full max-w-md overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-6">
+              <div className="flex items-start gap-3 mb-4">
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-primary/15 text-primary" aria-hidden>
+                  <PlayCircle className="h-6 w-6" />
                 </span>
-                <span className="text-xs text-base-content/60">
-                  {s.date}
-                  {s.note ? ` · ${s.note}` : ''}
-                </span>
-              </li>
-            ))}
-          </ul>
+                <div>
+                  <h3 id="start-cycle-dialog-title" className="text-lg font-semibold text-base-content m-0">Start new cycle?</h3>
+                  <p className="text-sm text-base-content/70 m-0 mt-0.5">Begin a fresh tracking period</p>
+                </div>
+              </div>
+              <div className="space-y-4 text-sm">
+                {selectedCycle && (
+                  <div className="flex gap-3 rounded-xl bg-base-200/80 p-3">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden>
+                      <CalendarRange className="h-4 w-4" />
+                    </span>
+                    <div className="min-w-0">
+                      <p className="font-medium text-base-content/80 m-0 mb-0.5">Current cycle</p>
+                      <p className="text-base-content font-medium m-0">{currentCycleName}</p>
+                      <p className="text-base-content/70 m-0 mt-1 flex items-center gap-1.5">
+                        <Scale className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                        Total: {sym}{totalExpense.toFixed(2)} · {balanceStatus}
+                      </p>
+                    </div>
+                  </div>
+                )}
+                <div className="flex flex-col gap-3 rounded-xl bg-primary/5 border border-primary/20 p-3">
+                  <div className="flex items-center gap-2">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-primary/15 text-primary" aria-hidden>
+                      <Calendar className="h-4 w-4" />
+                    </span>
+                    <p className="font-medium text-base-content/80 m-0">New cycle</p>
+                  </div>
+                  <div>
+                    <label htmlFor="new-cycle-start-date" className="block text-sm font-medium text-base-content/70 mb-1.5">Start date</label>
+                    <CallyDatePicker
+                      id="new-cycle-start-date"
+                      value={newCycleStartDate}
+                      onChange={(e) => setNewCycleStartDate(e.target.value)}
+                      min={todayIso}
+                      disabled={startCycleLoading}
+                      inputClassName="input input-bordered w-full min-h-11 rounded-lg border-base-300 bg-base-100"
+                      ariaLabel="Cycle start date"
+                    />
+                    <p className="text-base-content/70 text-sm mt-1.5 m-0">
+                      {newCycleStartDate && addDays(newCycleStartDate, 13)
+                        ? `${formatPeriodRange(newCycleStartDate, addDays(newCycleStartDate, 13))} (14 days)`
+                        : '14-day period from chosen date'}
+                    </p>
+                  </div>
+                  {newCycleStartDate && newCycleStartDate < todayIso && (
+                    <p className="text-error text-sm m-0 flex items-center gap-1.5">
+                      <Info className="h-4 w-4 shrink-0" aria-hidden />
+                      Start date cannot be before today.
+                    </p>
+                  )}
+                  {nextCycleNote && (
+                    <p className="text-warning text-xs m-0 flex items-center gap-1.5">
+                      <Info className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                      {nextCycleNote}
+                    </p>
+                  )}
+                </div>
+                {selectedCycle && (
+                  <div className="flex gap-2 rounded-lg border border-base-300 bg-base-200/50 px-3 py-2.5">
+                    <Info className="h-4 w-4 shrink-0 text-primary/80 mt-0.5" aria-hidden />
+                    <p className="text-base-content/70 m-0 text-sm leading-snug">
+                      The current cycle will be closed. New expenses will be added to the new cycle.
+                    </p>
+                  </div>
+                )}
+                {startCycleError && (
+                  <div className="rounded-lg border border-error/30 bg-error/10 px-3 py-2.5 text-sm text-error">
+                    {startCycleError}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="flex gap-3 p-4 border-t border-base-300 bg-base-200/50">
+              <button
+                type="button"
+                className="btn btn-ghost flex-1"
+                onClick={() => { setShowStartCycleConfirm(false); setStartCycleError(''); }}
+                disabled={startCycleLoading}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-primary flex-1"
+                disabled={startCycleLoading || (newCycleStartDate && newCycleStartDate < todayIso)}
+                onClick={() => {
+                  if (newCycleStartDate && newCycleStartDate < todayIso) return;
+                  setStartCycleError('');
+                  setStartCycleLoading(true);
+                  const p = onStartNewCycle?.(newCycleStartDate || todayIso);
+                  if (p && typeof p.then === 'function') {
+                    p.then(() => {
+                      setShowStartCycleConfirm(false);
+                    }).catch((err) => {
+                      let msg = err?.detail ?? err?.message;
+                      if (msg == null && typeof err === 'object' && !Array.isArray(err)) {
+                        const parts = [];
+                        for (const [k, v] of Object.entries(err)) {
+                          if (k === 'status') continue;
+                          const s = Array.isArray(v) ? v.join(' ') : String(v);
+                          if (s) parts.push(k === 'detail' ? s : `${k}: ${s}`);
+                        }
+                        msg = parts.length ? parts.join(' ') : null;
+                      }
+                      if (msg == null || msg === '') msg = 'Failed to start new cycle';
+                      setStartCycleError(Array.isArray(msg) ? msg[0] : msg);
+                    }).finally(() => setStartCycleLoading(false));
+                  } else {
+                    setShowStartCycleConfirm(false);
+                    setStartCycleLoading(false);
+                  }
+                }}
+              >
+                {startCycleLoading ? (
+                  <>
+                    <span className="loading loading-spinner loading-sm" aria-hidden />
+                    Starting…
+                  </>
+                ) : (
+                  <>
+                    <PlayCircle className="h-4 w-4 mr-1.5 shrink-0" aria-hidden />
+                    Start new cycle
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
         </div>
+      )}
+
+    </section>
+  );
+}
+
+/**
+ * Archive tab: past (resolved) cycles. Select a cycle to view its summary and expenses read-only.
+ */
+function ArchiveSection({ placeId, placeName: _placeName, cycleList = [], members: _members = [], currentUserId: _currentUserId, currency }) {
+  const sym = currency?.symbol ?? '$';
+  const resolvedCycles = (cycleList || []).filter((c) => c.status === 'resolved');
+  const [selectedCycleId, setSelectedCycleId] = useState(null);
+  const [archiveSummary, setArchiveSummary] = useState(null);
+  const [archiveExpenses, setArchiveExpenses] = useState([]);
+  const [archiveSettlements, setArchiveSettlements] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!placeId || !selectedCycleId) return;
+    let cancelled = false;
+    queueMicrotask(() => { if (!cancelled) setLoading(true); });
+    Promise.all([
+      summary(placeId, { cycle_id: selectedCycleId }),
+      expenses(placeId).list({ cycle_id: selectedCycleId, page_size: 100 }),
+      settlementsApi(placeId).list().then((r) => r?.results ?? []),
+    ])
+      .then(([sumData, exData, allSettlements]) => {
+        if (cancelled) return;
+        setArchiveSummary(sumData);
+        const list = Array.isArray(exData) ? exData : (exData?.results ?? []);
+        setArchiveExpenses(list);
+        const cycle = (cycleList || []).find((c) => c.id === selectedCycleId);
+        const inCycle = cycle
+          ? allSettlements.filter((s) => {
+              const d = s.date;
+              return d >= cycle.start_date && d <= cycle.end_date;
+            })
+          : [];
+        setArchiveSettlements(inCycle);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setArchiveSummary(null);
+        setArchiveExpenses([]);
+        setArchiveSettlements([]);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [placeId, selectedCycleId, cycleList]);
+
+  function handleArchiveCycleChange(value) {
+    const id = value ? Number(value) : null;
+    setSelectedCycleId(id);
+    if (!id) {
+      setArchiveSummary(null);
+      setArchiveExpenses([]);
+      setArchiveSettlements([]);
+    }
+  }
+
+  const selectedCycle = resolvedCycles.find((c) => c.id === selectedCycleId);
+
+  return (
+    <section className="card bg-base-200 border border-base-300 rounded-xl p-5 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-text-primary m-0 mb-2">Archive</h2>
+      <p className="text-sm text-text-secondary m-0 mb-6">
+        View past cycles and their expenses. Data is read-only.
+      </p>
+
+      {resolvedCycles.length === 0 ? (
+        <p className="text-sm text-text-secondary m-0">No resolved cycles yet.</p>
+      ) : (
+        <>
+          <label htmlFor="archive-cycle-select" className="block text-sm font-medium text-text-primary mb-2">
+            Select a cycle
+          </label>
+          <select
+            id="archive-cycle-select"
+            value={selectedCycleId ?? ''}
+            onChange={(e) => handleArchiveCycleChange(e.target.value)}
+            className="select select-bordered w-full max-w-md rounded-lg mb-6"
+          >
+            <option value="">— Choose cycle —</option>
+            {resolvedCycles.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name || `${c.start_date} – ${c.end_date}`} ✓ Resolved
+              </option>
+            ))}
+          </select>
+
+          {loading && (
+            <div className="flex items-center gap-2 text-sm text-text-secondary mb-4">
+              <Loader2 className="w-4 h-4 animate-spin shrink-0" aria-hidden />
+              Loading…
+            </div>
+          )}
+
+          {!loading && selectedCycle && archiveSummary && (
+            <div className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Cycle summary card – clear hierarchy and scannable amounts */}
+                <div className="rounded-xl border border-base-300 bg-base-100 p-5 shadow-[0_2px_10px_rgba(0,0,0,0.04)]">
+                  <h3 className="text-lg font-semibold text-text-primary m-0 mb-3">Cycle summary</h3>
+                  <p className="text-sm text-text-secondary mb-4 font-medium">
+                    {selectedCycle.name || `${selectedCycle.start_date} – ${selectedCycle.end_date}`}
+                  </p>
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between gap-3 py-2.5 px-3 rounded-lg bg-base-200/60">
+                      <span className="text-sm text-text-secondary">Total spent</span>
+                      <span className="text-base font-semibold text-text-primary tabular-nums">{sym}{Number(archiveSummary.total_expense ?? 0).toFixed(2)}</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-3 py-2.5 px-3 rounded-lg bg-base-200/60">
+                      <span className="text-sm text-text-secondary">Your share</span>
+                      <span className="text-base font-semibold text-primary tabular-nums">{sym}{Number(archiveSummary.my_expense ?? 0).toFixed(2)}</span>
+                    </div>
+                  </div>
+                </div>
+                {/* Settlement history card */}
+                <div className="rounded-xl border border-base-300 bg-base-100 p-5 shadow-[0_2px_10px_rgba(0,0,0,0.04)]">
+                  <h3 className="text-lg font-semibold text-text-primary m-0 mb-1">Settlement history</h3>
+                  <p className="text-sm text-text-secondary m-0 mb-4">Payments recorded in this cycle.</p>
+                  {archiveSettlements.length > 0 ? (
+                    <ul className="list-none p-0 m-0 space-y-0">
+                      {archiveSettlements.map((s) => (
+                        <li key={s.id} className="flex flex-wrap items-center justify-between gap-2 py-3 border-b border-base-200 last:border-b-0">
+                          <span className="text-sm text-text-primary">
+                            <span className="font-medium">{s.from_user_display_name || 'Someone'}</span>
+                            {' paid '}
+                            <span className="font-medium">{s.to_user_display_name || 'Someone'}</span>
+                            {' '}
+                            <span className="font-semibold tabular-nums text-primary">{sym}{Number(s.amount).toFixed(2)}</span>
+                          </span>
+                          <span className="text-xs text-text-secondary">
+                            {s.date}
+                            {s.note ? ` · ${s.note}` : ''}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="text-sm text-text-secondary m-0 py-2">No payments in this cycle.</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Expenses list */}
+              <div className="rounded-xl border border-base-300 bg-base-100 overflow-hidden shadow-[0_2px_10px_rgba(0,0,0,0.04)]">
+                <div className="px-4 py-3 border-b border-base-200 bg-base-200/30">
+                  <h3 className="text-lg font-semibold text-text-primary m-0">Expenses ({archiveExpenses.length})</h3>
+                </div>
+                {archiveExpenses.length === 0 ? (
+                  <p className="text-sm text-text-secondary m-0 p-4">No expenses in this cycle.</p>
+                ) : (
+                  <ul className="list-none p-0 m-0 divide-y divide-base-200">
+                    {archiveExpenses.map((exp) => {
+                      const paidBy = exp.paid_by?.display_name || exp.paid_by?.username || 'Someone';
+                      const catName = exp.category?.name ?? 'Uncategorized';
+                      const splitCount = exp.splits?.length ?? 0;
+                      return (
+                        <li key={exp.id} className="flex items-center justify-between gap-3 px-4 py-3 hover:bg-base-200/30 transition-colors">
+                          <span className="flex flex-col min-w-0">
+                            <span className="text-sm font-medium text-text-primary truncate">{exp.description || 'Expense'}</span>
+                            <span className="text-xs text-text-secondary">
+                              {catName} · Paid by {paidBy}{splitCount ? ` · ${splitCount} split${splitCount !== 1 ? 's' : ''}` : ''}
+                            </span>
+                          </span>
+                          <span className="text-sm font-semibold text-text-primary tabular-nums shrink-0">{sym}{Number(exp.amount ?? 0).toFixed(2)}</span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
+            </div>
+          )}
+        </>
       )}
     </section>
   );
 }
 
-function InviteSection({ placeId, placeName, inviteEmail, setInviteEmail, inviteList, onRefresh, members = [], currentUserId }) {
-  const [sending, setSending] = useState(false);
-  const [generating, setGenerating] = useState(false);
+/**
+ * About tab: for users who joined by invite (non-owners). Shows place info, members list, and Leave place.
+ */
+function AboutPlaceSection({ placeId, placeName, members = [], currentUserId, onRefresh }) {
+  const navigate = useNavigate();
+  const [leaving, setLeaving] = useState(false);
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
   const [error, setError] = useState('');
-  const [lastJoinLink, setLastJoinLink] = useState('');
-  const [copied, setCopied] = useState(false);
 
   const sortedMembers = Array.isArray(members)
     ? [...members].sort((a, b) => {
@@ -2873,6 +3205,178 @@ function InviteSection({ placeId, placeName, inviteEmail, setInviteEmail, invite
         return new Date(a.joined_at || 0) - new Date(b.joined_at || 0);
       })
     : [];
+
+  async function handleLeavePlace() {
+    setError('');
+    setLeaving(true);
+    setShowLeaveConfirm(false);
+    try {
+      await placesApi.leave(placeId);
+      onRefresh();
+      navigate('/places');
+    } catch (err) {
+      setError(err.error || err.message || 'Failed to leave place');
+    } finally {
+      setLeaving(false);
+    }
+  }
+
+  return (
+    <section className="card bg-base-200 border border-base-300 rounded-xl p-5 sm:p-6 mb-6">
+      <h2 className="text-lg font-semibold text-text-primary m-0 mb-2">About this place</h2>
+      <p className="text-sm text-text-secondary m-0 mb-6">
+        {placeName ? `You joined ${placeName} as a member.` : 'You are a member of this place.'}
+      </p>
+
+      {error && <div className="alert alert-error text-sm rounded-lg mb-4">{error}</div>}
+
+      <div className="mb-6">
+        <h3 className="text-sm font-semibold text-text-primary m-0 mb-3">Who’s here</h3>
+        {sortedMembers.length === 0 ? (
+          <p className="text-sm text-text-secondary m-0">No members yet.</p>
+        ) : (
+          <ul className="list-none p-0 m-0 divide-y divide-base-300 rounded-lg border border-base-300 bg-base-100">
+            {sortedMembers.map((m) => {
+              const joinedLabel = m.joined_at ? new Date(m.joined_at).toLocaleDateString() : null;
+              const isYou = m.user?.id === currentUserId;
+              const roleLabel = m.role === 'owner' ? 'Owner' : 'Member';
+              const name = m.user?.display_name || m.user?.username || 'Member';
+              return (
+                <li key={m.id ?? m.user?.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
+                  <span className="flex items-center gap-2 min-w-0">
+                    <Avatar username={name} photoUrl={m.user?.profile_photo} size="sm" />
+                    <span className="flex flex-col min-w-0">
+                      <span className="text-sm font-medium text-text-primary truncate">
+                        {name}{isYou ? ' (you)' : ''}
+                      </span>
+                      <span className="text-xs text-text-secondary">
+                        {roleLabel}{joinedLabel ? ` • Joined ${joinedLabel}` : ''}
+                      </span>
+                    </span>
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+
+      <div>
+        <button
+          type="button"
+          onClick={() => setShowLeaveConfirm(true)}
+          disabled={leaving}
+          className="btn btn-outline btn-sm border-base-300 text-text-secondary hover:border-error hover:text-error gap-2"
+        >
+          {leaving ? <Loader2 className="w-4 h-4 shrink-0 animate-spin" aria-hidden /> : null}
+          Leave place
+        </button>
+      </div>
+
+      {/* Leave place confirmation */}
+      {showLeaveConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="about-leave-place-dialog-title"
+          onClick={() => setShowLeaveConfirm(false)}
+        >
+          <div
+            className="bg-base-100 border border-base-300 rounded-2xl shadow-xl w-full max-w-md overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-6">
+              <div className="flex items-start gap-3 mb-4">
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-error/15 text-error" aria-hidden>
+                  <AlertTriangle className="h-6 w-6" />
+                </span>
+                <div>
+                  <h3 id="about-leave-place-dialog-title" className="text-lg font-semibold text-base-content m-0">Leave this place?</h3>
+                  <p className="text-sm text-base-content/70 m-0 mt-0.5">This cannot be undone</p>
+                </div>
+              </div>
+              <p className="text-sm text-base-content/80 m-0">
+                You will lose access to all data in this place. You cannot undo this action.
+              </p>
+            </div>
+            <div className="flex gap-3 p-4 border-t border-base-300 bg-base-200/50">
+              <button
+                type="button"
+                className="btn btn-ghost flex-1"
+                onClick={() => setShowLeaveConfirm(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-error flex-1 gap-2"
+                onClick={() => handleLeavePlace()}
+                disabled={leaving}
+              >
+                {leaving ? <Loader2 className="w-4 h-4 shrink-0 animate-spin" aria-hidden /> : <Trash2 className="w-4 h-4 shrink-0" aria-hidden />}
+                Leave place
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function InviteSection({ placeId, placeName, inviteEmail, setInviteEmail, inviteList, onRefresh, members = [], currentUserId, isOwner }) {
+  const navigate = useNavigate();
+  const [sending, setSending] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [error, setError] = useState('');
+  const [lastJoinLink, setLastJoinLink] = useState('');
+  const [copied, setCopied] = useState(false);
+  const [removingUserId, setRemovingUserId] = useState(null);
+  const [leaving, setLeaving] = useState(false);
+  const [showLeaveConfirm, setShowLeaveConfirm] = useState(false);
+  const [removeConfirmTarget, setRemoveConfirmTarget] = useState(null); // { userId, name } or null
+
+  const sortedMembers = Array.isArray(members)
+    ? [...members].sort((a, b) => {
+        if (a.role === 'owner' && b.role !== 'owner') return -1;
+        if (b.role === 'owner' && a.role !== 'owner') return 1;
+        return new Date(a.joined_at || 0) - new Date(b.joined_at || 0);
+      })
+    : [];
+
+  const currentMember = sortedMembers.find((m) => m.user?.id === currentUserId);
+  const ownerCount = sortedMembers.filter((m) => m.role === 'owner').length;
+  const canLeave = currentMember && (currentMember.role !== 'owner' || ownerCount > 1);
+
+  async function handleRemoveMember(userId) {
+    setError('');
+    setRemovingUserId(userId);
+    setRemoveConfirmTarget(null);
+    try {
+      await placeMembers(placeId).remove(userId);
+      onRefresh();
+    } catch (err) {
+      setError(err.error || err.message || 'Failed to remove member');
+    } finally {
+      setRemovingUserId(null);
+    }
+  }
+
+  async function handleLeavePlace() {
+    setError('');
+    setLeaving(true);
+    setShowLeaveConfirm(false);
+    try {
+      await placesApi.leave(placeId);
+      onRefresh();
+      navigate('/places');
+    } catch (err) {
+      setError(err.error || err.message || 'Failed to leave place');
+    } finally {
+      setLeaving(false);
+    }
+  }
 
   async function handleInviteByEmail(e) {
     e.preventDefault();
@@ -2971,10 +3475,14 @@ function InviteSection({ placeId, placeName, inviteEmail, setInviteEmail, invite
 
   return (
     <section className="card bg-base-200 border border-base-300 rounded-xl p-5 sm:p-6 mb-6">
-      <h2 className="text-lg font-semibold text-text-primary m-0 mb-2">Invite members</h2>
-      <p className="text-sm text-text-secondary m-0 mb-6">Share an invite link. Anyone with the link can join this place.</p>
+      <h2 className="text-lg font-semibold text-text-primary m-0 mb-2">{isOwner ? 'Invite members' : 'Members'}</h2>
+      {isOwner && (
+        <p className="text-sm text-text-secondary m-0 mb-6">Share an invite link. Anyone with the link can join this place.</p>
+      )}
 
       <div className="space-y-6">
+        {isOwner && (
+        <>
         {/* Share invite link */}
         <div>
           <h3 className="text-sm font-medium text-text-primary m-0 mb-3">Share invite link</h3>
@@ -3024,6 +3532,8 @@ function InviteSection({ placeId, placeName, inviteEmail, setInviteEmail, invite
             </div>
           )}
         </div>
+        </>
+        )}
       </div>
 
       {error && <div className="alert alert-error text-sm rounded-lg">{error}</div>}
@@ -3041,6 +3551,7 @@ function InviteSection({ placeId, placeName, inviteEmail, setInviteEmail, invite
                 const isYou = m.user?.id === currentUserId;
                 const roleLabel = m.role === 'owner' ? 'Owner' : 'Member';
                 const name = m.user?.display_name || m.user?.username || 'Member';
+                const canRemove = isOwner && !isYou && m.user?.id;
                 return (
                   <li key={m.id ?? m.user?.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
                     <span className="flex items-center gap-2 min-w-0">
@@ -3054,14 +3565,46 @@ function InviteSection({ placeId, placeName, inviteEmail, setInviteEmail, invite
                         </span>
                       </span>
                     </span>
+                    {canRemove && (
+                      <button
+                        type="button"
+                        onClick={() => setRemoveConfirmTarget({ userId: m.user.id, name })}
+                        disabled={removingUserId === m.user.id}
+                        className="btn btn-ghost btn-sm text-error hover:bg-error/10 min-h-8 gap-1"
+                        aria-label={`Remove ${name}`}
+                      >
+                        {removingUserId === m.user.id ? (
+                          <Loader2 className="w-4 h-4 shrink-0 animate-spin" aria-hidden />
+                        ) : (
+                          <Trash2 className="w-4 h-4 shrink-0" aria-hidden />
+                        )}
+                        <span className="hidden sm:inline">Remove</span>
+                      </button>
+                    )}
                   </li>
                 );
               })}
             </ul>
           )}
+          {canLeave && (
+            <div className="mt-4">
+              <button
+                type="button"
+                onClick={() => setShowLeaveConfirm(true)}
+                disabled={leaving}
+                className="btn btn-outline btn-sm border-base-300 text-text-secondary hover:border-error hover:text-error gap-2"
+              >
+                {leaving ? (
+                  <Loader2 className="w-4 h-4 shrink-0 animate-spin" aria-hidden />
+                ) : null}
+                Leave place
+              </button>
+            </div>
+          )}
         </div>
 
-        {/* Pending invites */}
+        {/* Pending invites - owner only */}
+        {isOwner && (
         <div>
           <h3 className="text-sm font-semibold text-text-primary m-0 mb-3">Pending invites</h3>
           {inviteList.length === 0 ? (
@@ -3083,7 +3626,106 @@ function InviteSection({ placeId, placeName, inviteEmail, setInviteEmail, invite
             </ul>
           )}
         </div>
+        )}
       </div>
+
+      {/* Leave place confirmation */}
+      {showLeaveConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="leave-place-dialog-title"
+          onClick={() => setShowLeaveConfirm(false)}
+        >
+          <div
+            className="bg-base-100 border border-base-300 rounded-2xl shadow-xl w-full max-w-md overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-6">
+              <div className="flex items-start gap-3 mb-4">
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-error/15 text-error" aria-hidden>
+                  <AlertTriangle className="h-6 w-6" />
+                </span>
+                <div>
+                  <h3 id="leave-place-dialog-title" className="text-lg font-semibold text-base-content m-0">Leave this place?</h3>
+                  <p className="text-sm text-base-content/70 m-0 mt-0.5">This cannot be undone</p>
+                </div>
+              </div>
+              <p className="text-sm text-base-content/80 m-0">
+                You will lose access to all data in this place. You cannot undo this action.
+              </p>
+            </div>
+            <div className="flex gap-3 p-4 border-t border-base-300 bg-base-200/50">
+              <button
+                type="button"
+                className="btn btn-ghost flex-1"
+                onClick={() => setShowLeaveConfirm(false)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-error flex-1 gap-2"
+                onClick={() => handleLeavePlace()}
+                disabled={leaving}
+              >
+                {leaving ? <Loader2 className="w-4 h-4 shrink-0 animate-spin" aria-hidden /> : <Trash2 className="w-4 h-4 shrink-0" aria-hidden />}
+                Leave place
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Remove member confirmation */}
+      {removeConfirmTarget && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="remove-member-dialog-title"
+          onClick={() => setRemoveConfirmTarget(null)}
+        >
+          <div
+            className="bg-base-100 border border-base-300 rounded-2xl shadow-xl w-full max-w-md overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="p-6">
+              <div className="flex items-start gap-3 mb-4">
+                <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-error/15 text-error" aria-hidden>
+                  <AlertTriangle className="h-6 w-6" />
+                </span>
+                <div>
+                  <h3 id="remove-member-dialog-title" className="text-lg font-semibold text-base-content m-0">Remove member?</h3>
+                  <p className="text-sm text-base-content/70 m-0 mt-0.5">This cannot be undone</p>
+                </div>
+              </div>
+              <p className="text-sm text-base-content/80 m-0">
+                You are about to remove <strong>{removeConfirmTarget.name}</strong> from this place. They will lose access to all data here. This action cannot be undone.
+              </p>
+            </div>
+            <div className="flex gap-3 p-4 border-t border-base-300 bg-base-200/50">
+              <button
+                type="button"
+                className="btn btn-ghost flex-1"
+                onClick={() => setRemoveConfirmTarget(null)}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="btn btn-error flex-1 gap-2"
+                onClick={() => handleRemoveMember(removeConfirmTarget.userId)}
+                disabled={removingUserId === removeConfirmTarget.userId}
+              >
+                {removingUserId === removeConfirmTarget.userId ? <Loader2 className="w-4 h-4 shrink-0 animate-spin" aria-hidden /> : <Trash2 className="w-4 h-4 shrink-0" aria-hidden />}
+                Remove
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }
