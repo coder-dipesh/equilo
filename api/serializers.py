@@ -213,6 +213,30 @@ class ExpenseSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['created_at', 'place', 'added_by', 'cycle']
 
+    @staticmethod
+    def _paid_by_id_from_initial(initial_data):
+        """
+        `paid_by` is read-only (nested User in responses), so DRF does not put it in validated_data.
+        Clients send paid_by as a user id (integer). Read it from the raw request body.
+        """
+        if not initial_data:
+            return None
+        pb = initial_data.get('paid_by')
+        if pb is None:
+            return None
+        if isinstance(pb, dict):
+            pid = pb.get('id')
+            if pid is None:
+                return None
+            try:
+                return int(pid)
+            except (TypeError, ValueError):
+                return None
+        try:
+            return int(pb)
+        except (TypeError, ValueError):
+            return None
+
     def create(self, validated_data):
         split_user_ids = validated_data.pop('split_user_ids', [])
         user = self.context['request'].user
@@ -220,12 +244,10 @@ class ExpenseSerializer(serializers.ModelSerializer):
         if not place or not place.members.filter(user=user).exists():
             raise serializers.ValidationError('You are not a member of this place.')
         current_cycle = self.context.get('current_cycle')
-        paid_by = validated_data.pop('paid_by', None)
-        paid_by_id = getattr(paid_by, 'id', paid_by) if paid_by is not None else None
-        if not paid_by_id or not place.members.filter(user_id=paid_by_id).exists():
-            paid_by = user
-        elif isinstance(paid_by, int):
-            paid_by = User.objects.get(pk=paid_by)
+        paid_by_id = self._paid_by_id_from_initial(getattr(self, 'initial_data', None))
+        paid_by = user
+        if paid_by_id and place.members.filter(user_id=paid_by_id).exists():
+            paid_by = User.objects.get(pk=paid_by_id)
         expense = Expense.objects.create(
             place=place,
             cycle=current_cycle,
@@ -245,6 +267,10 @@ class ExpenseSerializer(serializers.ModelSerializer):
 
     def update(self, instance, validated_data):
         split_user_ids = validated_data.pop('split_user_ids', None)
+        place = instance.place
+        paid_by_id = self._paid_by_id_from_initial(getattr(self, 'initial_data', None))
+        if paid_by_id is not None and place.members.filter(user_id=paid_by_id).exists():
+            instance.paid_by_id = paid_by_id
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
