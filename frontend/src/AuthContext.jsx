@@ -15,11 +15,9 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const token = getAccessToken();
-    if (!token) {
-      setLoading(false);
-      return;
-    }
+    // Don't rely on sessionStorage presence for auth. When the app is backgrounded,
+    // some browsers may evict sessionStorage while the HttpOnly refresh cookie remains.
+    // Calling /auth/me will 401 → refresh via cookie → retry, keeping the user signed in.
     authApi
       .me()
       .then((userData) => {
@@ -30,7 +28,15 @@ export function AuthProvider({ children }) {
           /* empty */
         }
       })
-      .catch(() => {})
+      .catch(() => {
+        setUser(null);
+        try {
+          localStorage.removeItem('user');
+        } catch {
+          /* empty */
+        }
+        clearAccessToken();
+      })
       .finally(() => setLoading(false));
   }, []);
 
