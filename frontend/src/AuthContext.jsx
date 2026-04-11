@@ -15,9 +15,15 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    // Don't rely on sessionStorage presence for auth. When the app is backgrounded,
-    // some browsers may evict sessionStorage while the HttpOnly refresh cookie remains.
-    // Calling /auth/me will 401 → refresh via cookie → retry, keeping the user signed in.
+    // On login/register we are not authenticated yet — skip /auth/me to avoid 401 + refresh noise.
+    // (Global api() no longer redirects /login → /login; this also saves requests.)
+    const path = typeof window !== 'undefined' ? window.location.pathname : '';
+    if (path === '/login' || path === '/register') {
+      setLoading(false);
+      return;
+    }
+    // Don't rely on sessionStorage alone: backgrounded tabs may clear it while the refresh cookie remains.
+    // /auth/me → 401 → refresh via cookie → retry restores the session.
     authApi
       .me()
       .then((userData) => {
