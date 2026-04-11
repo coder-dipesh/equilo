@@ -59,6 +59,14 @@ function clearAccessToken() {
 
 const defaultFetchOptions = { credentials: 'include' };
 
+/** Avoid redirect loop: 401 handler used to send /login → /login forever. */
+function shouldRedirectToLogin() {
+  if (typeof window === 'undefined') return true;
+  const p = window.location.pathname || '';
+  if (p === '/login' || p === '/register') return false;
+  return true;
+}
+
 async function fetchWithTimeout(input, init = {}, timeoutMs = DEFAULT_TIMEOUT_MS) {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -109,7 +117,7 @@ export async function api(url, options = {}) {
     } catch {
       /* empty */
     }
-    if (!isLoginOrRegister) {
+    if (!isLoginOrRegister && shouldRedirectToLogin()) {
       window.location.href = '/login';
     }
     const data = await res.json().catch(() => ({}));
@@ -154,7 +162,9 @@ export async function apiWithFormData(url, formData, method = 'PATCH') {
     } catch {
       /* empty */
     }
-    window.location.href = '/login';
+    if (shouldRedirectToLogin()) {
+      window.location.href = '/login';
+    }
     throw new Error('Unauthorized');
   }
   const data = res.ok ? await res.json().catch(() => ({})) : await res.json().catch(() => ({}));
