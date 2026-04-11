@@ -581,7 +581,6 @@ export default function PlaceDetail() {
             cyclesApi(id)
               .resolve(cycleId)
               .then(load)
-              .then(() => setSelectedCycleId(null))
               .catch(() => {})
             }
           onStartNewCycle={(startDate) =>
