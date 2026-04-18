@@ -238,6 +238,31 @@ export default function PlaceDetail() {
   const [loading, setLoading] = useState(true);
   const [expenseToEditFromUrl, setExpenseToEditFromUrl] = useState(null);
 
+  /** Latest summary fetch wins; avoids period response overwriting cycle summary after race. */
+  const summaryFetchSeq = useRef(0);
+  function nextSummaryFetchSeq() {
+    summaryFetchSeq.current += 1;
+    return summaryFetchSeq.current;
+  }
+  function summaryPayloadMatchesSelection(payload, expectedCycleId) {
+    if (expectedCycleId != null) {
+      const want = Number(expectedCycleId);
+      const got =
+        payload?.cycle_id != null
+          ? Number(payload.cycle_id)
+          : payload?.cycle?.id != null
+            ? Number(payload.cycle.id)
+            : NaN;
+      return got === want;
+    }
+    return payload?.period !== 'cycle' && payload?.cycle == null;
+  }
+  function applySummaryIfCurrent(seq, payload, expectedCycleId) {
+    if (seq !== summaryFetchSeq.current) return;
+    if (!summaryPayloadMatchesSelection(payload, expectedCycleId)) return;
+    setSummaryData(payload);
+  }
+
   const isOwner = place?.members?.some((m) => m.user?.id === user?.id && m.role === 'owner');
 
   function clearEditExpenseFromUrl() {
@@ -285,12 +310,14 @@ export default function PlaceDetail() {
           const preferredCycle = openCycle || pendingCycle;
           if (preferredCycle) {
             setSelectedCycleId(preferredCycle.id);
+            const s = nextSummaryFetchSeq();
             summary(id, { cycle_id: preferredCycle.id })
-              .then(setSummaryData)
+              .then((d) => applySummaryIfCurrent(s, d, preferredCycle.id))
               .catch(() => {})
               .finally(() => setLoading(false));
           } else {
-            if (sumRes.status === 'fulfilled') setSummaryData(sumRes.value);
+            const s = nextSummaryFetchSeq();
+            if (sumRes.status === 'fulfilled') applySummaryIfCurrent(s, sumRes.value, null);
             setLoading(false);
           }
         });
@@ -344,10 +371,12 @@ export default function PlaceDetail() {
     let intervalId = null;
 
     function refreshSilent() {
+      const seq = nextSummaryFetchSeq();
+      const expectedCycleId = selectedCycleId;
       Promise.allSettled([
         expenses(id).list({ page: expensePage, page_size: expensePageSize }),
-        selectedCycleId != null
-          ? summary(id, { cycle_id: selectedCycleId })
+        expectedCycleId != null
+          ? summary(id, { cycle_id: expectedCycleId })
           : summary(id, { period, from: summaryPeriodEnd || undefined, weekStart: startOfWeek }),
         placeMembers(id).list(),
         cyclesApi(id).list(),
@@ -360,7 +389,7 @@ export default function PlaceDetail() {
           setExpenseList(list);
           setExpenseTotalCount(count);
         }
-        if (sumRes.status === 'fulfilled') setSummaryData(sumRes.value);
+        if (sumRes.status === 'fulfilled') applySummaryIfCurrent(seq, sumRes.value, expectedCycleId);
         if (memRes.status === 'fulfilled') setMembers(memRes.value);
         if (cyRes.status === 'fulfilled') setCycleList(Array.isArray(cyRes.value) ? cyRes.value : []);
       });
@@ -393,10 +422,15 @@ export default function PlaceDetail() {
 
   useEffect(() => {
     if (!id || !place) return;
-    const params = selectedCycleId != null
-      ? { cycle_id: selectedCycleId }
-      : { period, from: summaryPeriodEnd || undefined, weekStart: startOfWeek };
-    summary(id, params).then(setSummaryData).catch(() => {});
+    const seq = nextSummaryFetchSeq();
+    const expectedCycleId = selectedCycleId;
+    const params =
+      expectedCycleId != null
+        ? { cycle_id: expectedCycleId }
+        : { period, from: summaryPeriodEnd || undefined, weekStart: startOfWeek };
+    summary(id, params)
+      .then((d) => applySummaryIfCurrent(seq, d, expectedCycleId))
+      .catch(() => {});
   }, [id, period, summaryPeriodEnd, place, startOfWeek, selectedCycleId]);
 
   const currentCycle = cycleList.find((c) => c.status === 'open') || null;
@@ -1725,7 +1759,21 @@ function SummarySection({
   onRefreshSummary,
 }) {
   const sym = currency?.symbol ?? '$';
-  const netBalance = (data.total_owed_to_me ?? 0) - (data.total_i_owe ?? 0);
+  const memberList = data.by_member_balance_list ?? [];
+  const cycleScopedSummary = data.cycle != null || data.period === 'cycle' || data.cycle_id != null;
+  const netBalance = (() => {
+    if (cycleScopedSummary && memberList.length > 0) {
+      let iOwe = 0;
+      let owedToMe = 0;
+      for (const m of memberList) {
+        const b = Number(m.balance);
+        if (b > 0) iOwe += b;
+        else if (b < 0) owedToMe += -b;
+      }
+      return owedToMe - iOwe;
+    }
+    return (data.total_owed_to_me ?? 0) - (data.total_i_owe ?? 0);
+  })();
   const isCycleMode = data.cycle != null;
   const periodLabel = isCycleMode ? 'Cycle' : (period === 'fortnightly' ? 'Fortnight' : 'Week');
   const rangeStr = data.cycle?.name || formatPeriodRange(data.from, data.to);
@@ -1756,7 +1804,6 @@ function SummarySection({
     { name: "Your share", value: myShare, color: CHART_COLORS.primary },
     { name: "Others' share", value: othersShare, color: CHART_COLORS.othersShare },
   ].filter((d) => d.value > 0);
-  const memberList = data.by_member_balance_list ?? [];
   const hasOverpay = (data.total_i_paid ?? 0) > myShare;
   const totalIPaid = data.total_i_paid ?? 0;
   const totalOwedToMe = data.total_owed_to_me ?? 0;
