@@ -1,5 +1,5 @@
 import { createContext, useContext, useState, useEffect } from 'react';
-import { auth as authApi, persistAccessToken, getAccessToken, clearAccessToken } from './api';
+import { auth as authApi, persistAccessToken, getAccessToken, clearAccessToken, refreshAccessToken } from './api';
 
 const AuthContext = createContext(null);
 
@@ -34,16 +34,36 @@ export function AuthProvider({ children }) {
           /* empty */
         }
       })
-      .catch(() => {
-        setUser(null);
-        try {
-          localStorage.removeItem('user');
-        } catch {
-          /* empty */
+      .catch((err) => {
+        // Only clear session on real auth failure — not timeouts / offline (status 0) or server errors
+        if (err?.status === 401) {
+          setUser(null);
+          try {
+            localStorage.removeItem('user');
+          } catch {
+            /* empty */
+          }
+          clearAccessToken();
         }
-        clearAccessToken();
       })
       .finally(() => setLoading(false));
+  }, []);
+
+  // After idle/background: refresh access using cookie so the next request does not race many 401s
+  useEffect(() => {
+    let lastRefresh = 0;
+    const minGapMs = 5 * 60 * 1000;
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      const path = typeof window !== 'undefined' ? window.location.pathname : '';
+      if (path === '/login' || path === '/register') return;
+      const now = Date.now();
+      if (now - lastRefresh < minGapMs) return;
+      lastRefresh = now;
+      void refreshAccessToken();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   }, []);
 
   const login = async (username, password) => {

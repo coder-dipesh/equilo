@@ -57,6 +57,35 @@ function clearAccessToken() {
   }
 }
 
+/** Single-flight refresh: concurrent 401s share one refresh so rotation does not blacklist the winner's cookie. */
+let refreshInFlight = null;
+
+/**
+ * Obtain a new access token using the HttpOnly refresh cookie.
+ * @returns {Promise<boolean>} true if a new access token was stored
+ */
+export async function refreshAccessToken() {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = (async () => {
+    try {
+      const r = await fetchWithTimeout(`${API_BASE}/auth/token/refresh/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (!r.ok) return false;
+      const data = await r.json().catch(() => ({}));
+      if (data.access) setAccessToken(data.access);
+      return Boolean(data.access);
+    } catch {
+      return false;
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+  return refreshInFlight;
+}
+
 const defaultFetchOptions = { credentials: 'include' };
 
 /** Avoid redirect loop: 401 handler used to send /login → /login forever. */
@@ -78,38 +107,26 @@ async function fetchWithTimeout(input, init = {}, timeoutMs = DEFAULT_TIMEOUT_MS
 }
 
 export async function api(url, options = {}) {
+  const { _didRefresh, ...fetchOptions } = options;
   const headers = {
     'Content-Type': 'application/json',
-    ...options.headers,
+    ...fetchOptions.headers,
   };
   const token = getAccessToken();
   if (token) headers['Authorization'] = `Bearer ${token}`;
   let res;
   try {
-    res = await fetchWithTimeout(`${API_BASE}${url}`, { ...options, headers });
+    res = await fetchWithTimeout(`${API_BASE}${url}`, { ...fetchOptions, headers });
   } catch (e) {
     if (e?.name === 'AbortError') throw { status: 0, message: 'Request timed out' };
     throw e;
   }
   if (res.status === 401) {
     const isLoginOrRegister = url === '/auth/token/' || url.startsWith('/auth/register');
-    if (!isLoginOrRegister) {
-      let r;
-      try {
-        r = await fetchWithTimeout(`${API_BASE}/auth/token/refresh/`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({}),
-        });
-      } catch (e) {
-        if (e?.name === 'AbortError') throw { status: 0, message: 'Request timed out' };
-        throw e;
-      }
-      if (r.ok) {
-        const data = await r.json();
-        if (data.access) setAccessToken(data.access);
-        return api(url, options);
-      }
+    const isRefreshEndpoint = url === '/auth/token/refresh/';
+    if (!isLoginOrRegister && !isRefreshEndpoint && !_didRefresh) {
+      const refreshed = await refreshAccessToken();
+      if (refreshed) return api(url, { ...options, _didRefresh: true });
     }
     clearAccessToken();
     try {
@@ -128,7 +145,7 @@ export async function api(url, options = {}) {
   return data;
 }
 
-export async function apiWithFormData(url, formData, method = 'PATCH') {
+export async function apiWithFormData(url, formData, method = 'PATCH', didRefresh = false) {
   const token = getAccessToken();
   const headers = {};
   if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -140,21 +157,9 @@ export async function apiWithFormData(url, formData, method = 'PATCH') {
     throw e;
   }
   if (res.status === 401) {
-    let r;
-    try {
-      r = await fetchWithTimeout(`${API_BASE}/auth/token/refresh/`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      });
-    } catch (e) {
-      if (e?.name === 'AbortError') throw { status: 0, message: 'Request timed out' };
-      throw e;
-    }
-    if (r.ok) {
-      const data = await r.json();
-      if (data.access) setAccessToken(data.access);
-      return apiWithFormData(url, formData, method);
+    if (!didRefresh) {
+      const refreshed = await refreshAccessToken();
+      if (refreshed) return apiWithFormData(url, formData, method, true);
     }
     clearAccessToken();
     try {

@@ -1264,14 +1264,18 @@ def _compute_period_summary(place_id, me, start_date, end_date):
 
 
 def _compute_cycle_summary(place_id, me, cycle):
-    """Returns total_expense, my_expense, total_i_paid, balance_with for expenses in this cycle."""
+    """Returns total_expense, my_expense, total_i_paid, balance_with for expenses in this cycle.
+
+    Settlements: rows linked to this cycle (cycle FK), plus legacy rows with no cycle whose
+    payment date falls in the cycle window — never settlements tied to a different cycle by date alone.
+    """
     expenses = _expenses_since_joined(place_id, me).filter(cycle=cycle).prefetch_related('splits__user')
     total_expense, my_expense, total_i_paid, balance_with = _compute_balance_from_expenses(expenses, me)
-    settlements = Settlement.objects.filter(
-        place_id=place_id,
-        date__gte=cycle.start_date,
-        date__lte=cycle.end_date,
-    ).select_related('from_user', 'to_user')
+    settlements = (
+        Settlement.objects.filter(place_id=place_id)
+        .filter(Q(cycle_id=cycle.id) | Q(cycle__isnull=True, date__gte=cycle.start_date, date__lte=cycle.end_date))
+        .select_related('from_user', 'to_user')
+    )
     _apply_settlements_to_balance(balance_with, settlements, me)
     return total_expense, my_expense, total_i_paid, balance_with
 
@@ -1411,6 +1415,7 @@ def place_summary(request, place_id):
         }
         if cycle:
             payload['cycle'] = ExpenseCycleSerializer(cycle).data
+            payload['cycle_id'] = cycle.id
             payload['all_settled'] = _cycle_all_settled(place_id, cycle)
         return Response(payload)
     except Exception as exc:
