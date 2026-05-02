@@ -1,0 +1,17 @@
+{% extends "emails/_base.txt" %}
+
+{% block body %}Cycle ended for {{ place.name }}
+
+Hi {{ user_display_name }},
+
+The {{ period_label }} expense cycle for {{ place.name }} just closed.
+{% if balance_lines %}
+Where you stand:
+{% for line in balance_lines %}  - {{ line }}
+{% endfor %}
+{% else %}
+You're all settled for this cycle. Nothing to do.
+{% endif %}
+Open settlement: {{ deep_link }}
+
+No new expenses can be added to this cycle. Settle up with each member to fully resolve it.{% endblock %}

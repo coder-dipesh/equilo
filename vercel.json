@@ -12,5 +12,11 @@
       "src": "/(.*)",
       "dest": "equilo/wsgi.py"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/cron/transition-cycles/",
+      "schedule": "5 0 * * *"
+    }
   ]
 }

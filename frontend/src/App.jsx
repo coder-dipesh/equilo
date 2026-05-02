@@ -118,7 +118,14 @@ function AppRoutes() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
-      <Route path="/join/:token" element={<Join />} />
+      <Route
+        path="/join/:token"
+        element={
+          <ProtectedLayout>
+            <Join />
+          </ProtectedLayout>
+        }
+      />
       <Route
         path="/"
         element={<HomeRoute />}

@@ -258,6 +258,58 @@ CORS_ALLOW_ALL_ORIGINS = False
 
 # Celery (broker for tasks; Beat runs auto_resolve_past_cycles daily)
 CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://localhost:6379/0')
+
+# Cache: use Redis when an explicit URL is provided (prod / Vercel), otherwise
+# fall back to in-process memory so local dev does not require a running Redis.
+_redis_url = os.environ.get('REDIS_URL') or os.environ.get('CELERY_BROKER_URL')
+if _redis_url:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": _redis_url.replace("/0", "/1"),
+            "OPTIONS": {
+                "socket_connect_timeout": 2,
+                "socket_timeout": 2,
+            },
+        }
+    }
+else:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "equilo-local",
+        }
+    }
+
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
+
+# Email (Brevo SMTP relay). When EMAIL_HOST_USER is empty, falls back to console
+# backend so local dev can see the rendered email in the runserver log instead
+# of needing real SMTP credentials.
+EMAIL_HOST_USER = os.environ.get('EMAIL_HOST_USER', '').strip()
+EMAIL_HOST_PASSWORD = os.environ.get('EMAIL_HOST_PASSWORD', '').strip()
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'Equilo <noreply@equilo.app>')
+SERVER_EMAIL = DEFAULT_FROM_EMAIL
+EMAIL_HOST = 'smtp-relay.brevo.com'
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+EMAIL_TIMEOUT = 10
+if EMAIL_HOST_USER and EMAIL_HOST_PASSWORD:
+    EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
+else:
+    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+
+# Public URLs used by transactional email:
+#   FRONTEND_URL — base for "open the app" deep links (the React SPA)
+#   BACKEND_URL  — base for backend-served URLs (unsubscribe). Defaults to
+#                  FRONTEND_URL for single-host setups; in the standard
+#                  two-project Vercel deployment, set this to the backend host.
+FRONTEND_URL = os.environ.get('FRONTEND_URL', 'http://localhost:5173').rstrip('/')
+BACKEND_URL = (os.environ.get('BACKEND_URL') or FRONTEND_URL).rstrip('/')
+
+# Shared secret required by Vercel Cron-invoked endpoints (e.g. daily cycle
+# transition). Sent as ?secret=... in the cron URL configured in vercel.json.
+CRON_SECRET = os.environ.get('CRON_SECRET', '').strip()
+

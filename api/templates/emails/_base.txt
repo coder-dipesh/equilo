@@ -1,0 +1,6 @@
+{% block body %}{% endblock %}
+
+—
+Equilo · Shared expenses, made simple.
+You're receiving this because you're an Equilo member.
+To stop these emails, open: {{ unsubscribe_url }}
