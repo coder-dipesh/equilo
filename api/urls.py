@@ -31,6 +31,8 @@ urlpatterns = [
     path('auth/token/refresh/', views.CookieTokenRefreshView.as_view(), name='token_refresh'),
     path('invite/<str:token>/', views.invite_by_token),
     path('join/<str:token>/', views.join_place),
+    path('email/unsubscribe/<str:token>/', views.email_unsubscribe, name='email_unsubscribe'),
+    path('cron/transition-cycles/', views.cron_transition_cycles, name='cron-transition-cycles'),
     path('', include(router.urls)),
     # Nested under place
     path('places/<int:place_id>/members/', views.PlaceMemberList.as_view(), name='place-members'),

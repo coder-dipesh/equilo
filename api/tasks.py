@@ -1,16 +1,23 @@
 """
 Celery tasks for Equilo. Used by Celery Beat for scheduled jobs.
+
+NOTE: On Vercel there is no long-lived process to run Celery Beat or a worker,
+so the actual production trigger for the daily cycle transition is the
+``/api/cron/transition-cycles/`` HTTP endpoint invoked by Vercel Cron. Both
+paths share the same implementation in :func:`transition_pending_cycles`.
 """
 from celery import shared_task
 from django.utils import timezone
 
 
-@shared_task
-def auto_transition_past_cycles_to_pending():
+def transition_pending_cycles() -> dict:
     """
-    Run daily (e.g. via Celery Beat). Find all OPEN cycles whose end_date has passed,
-    transition them to PENDING_SETTLEMENT (no new expenses; members settle up), and
-    send notifications. Resolve (RESOLVED) is manual by admin only when all balances are 0.
+    Find OPEN cycles past their ``end_date``, move them to PENDING_SETTLEMENT,
+    and fire the cycle-ended notification + email batch for each.
+
+    Pure function (no Celery / no HTTP), so the same body is reused by:
+      - the Celery Beat task below (local dev)
+      - the Vercel Cron HTTP endpoint (production)
     """
     from .models import ExpenseCycle
     from .views import _send_cycle_ended_notifications
@@ -29,6 +36,12 @@ def auto_transition_past_cycles_to_pending():
         count += 1
 
     return {'transitioned_to_pending': count}
+
+
+@shared_task
+def auto_transition_past_cycles_to_pending():
+    """Celery wrapper around :func:`transition_pending_cycles`."""
+    return transition_pending_cycles()
 
 
 @shared_task

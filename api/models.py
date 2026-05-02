@@ -12,6 +12,7 @@ class UserProfile(models.Model):
     )
     display_name = models.CharField(max_length=255, blank=True)
     profile_photo = models.ImageField(upload_to='profiles/', blank=True, null=True)
+    email_notifications_enabled = models.BooleanField(default=True)
 
     def __str__(self):
         return f"Profile for {self.user.username}"

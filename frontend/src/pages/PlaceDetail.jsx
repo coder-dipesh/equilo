@@ -2500,12 +2500,6 @@ function SummarySection({
             <h3 className="text-sm font-medium text-base-content/70 m-0">Your contribution</h3>
           </div>
           <p className="text-2xl font-bold text-primary m-0">{sym}{totalIPaid.toFixed(2)}</p>
-          {hasOverpay && (
-            <div className="mt-3 flex items-center justify-between gap-2 rounded-lg border border-primary/20 bg-primary/10 px-3 py-2">
-              <span className="text-sm text-base-content/80">You paid {sym}{(totalIPaid - myShare).toFixed(2)} more than your share</span>
-              <span className="text-sm font-semibold text-primary tabular-nums">+{sym}{(totalIPaid - myShare).toFixed(2)}</span>
-            </div>
-          )}
           <button
             type="button"
             className="mt-3 flex w-full items-center justify-between gap-2 rounded-lg py-2 text-left text-sm font-medium text-base-content/80 hover:bg-base-200/60 transition-colors"

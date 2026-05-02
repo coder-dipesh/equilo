@@ -1,0 +1,13 @@
+{% extends "emails/_base.txt" %}
+
+{% block body %}Welcome to {{ place.name }}
+
+Hi {{ user_display_name }},
+
+You're now a member of {{ place.name }}{% if member_count %} along with {{ member_count|add:"-1" }} other{{ member_count|add:"-1"|pluralize }}{% endif %}.
+
+From here you can log shared expenses, see what each person owes, and settle up at the end of every cycle.
+
+Open {{ place.name }}: {{ deep_link }}
+
+Tip: add your first expense to get balances rolling.{% endblock %}

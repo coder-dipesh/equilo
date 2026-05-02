@@ -58,6 +58,7 @@ export default function Navbar() {
   const notifToast = toastQueue[0] || null;
 
   async function refreshNotifications(limit = 8, playOnIncrease = false) {
+    if (!user) return;
     setNotifError('');
     setNotifLoading(true);
     try {
@@ -396,23 +397,25 @@ export default function Navbar() {
           </nav>
 
           <div className="flex items-center gap-2 sm:gap-3 shrink-0">
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm btn-square rounded-lg"
-              aria-label="Notifications"
-              title="Notifications"
-              ref={notifTriggerRef}
-              onClick={() => setNotifOpen((o) => !o)}
-            >
-              <span className="relative">
-                <Bell className="w-5 h-5 text-base-content/60" aria-hidden />
-                {notifUnreadCount > 0 && (
-                  <span className="absolute -top-1 -right-1 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-error text-white text-[10px] font-semibold">
-                    {notifUnreadCount > 9 ? '9+' : notifUnreadCount}
-                  </span>
-                )}
-              </span>
-            </button>
+            {user && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm btn-square rounded-lg"
+                aria-label="Notifications"
+                title="Notifications"
+                ref={notifTriggerRef}
+                onClick={() => setNotifOpen((o) => !o)}
+              >
+                <span className="relative">
+                  <Bell className="w-5 h-5 text-base-content/60" aria-hidden />
+                  {notifUnreadCount > 0 && (
+                    <span className="absolute -top-1 -right-1 inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-error text-white text-[10px] font-semibold">
+                      {notifUnreadCount > 9 ? '9+' : notifUnreadCount}
+                    </span>
+                  )}
+                </span>
+              </button>
+            )}
             <label className="swap swap-rotate btn btn-ghost btn-sm btn-square rounded-lg" title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}>
               <input
                 type="checkbox"
@@ -427,26 +430,43 @@ export default function Navbar() {
                 <path d="M21.64,13a1,1,0,0,0-1.05-.14,8.05,8.05,0,0,1-3.37.73A8.15,8.15,0,0,1,9.08,5.49a8.59,8.59,0,0,1,.25-2A1,1,0,0,0,8,2.36,10.14,10.14,0,1,0,22,14.05,1,1,0,0,0,21.64,13Zm-9.5,6.69A8.14,8.14,0,0,1,7.08,5.22v.27A10.15,10.15,0,0,0,17.22,15.63a9.79,9.79,0,0,0,2.1-.22A8.11,8.11,0,0,1,12.14,19.73Z" />
               </svg>
             </label>
-            <div className="relative" ref={triggerRef}>
-              <button
-                type="button"
-                onClick={() => setLogoutOpen(!logoutOpen)}
-                className="flex items-center gap-2 sm:gap-2.5 px-2 py-1.5 sm:px-3 sm:py-2 rounded-lg border border-border bg-base-100 hover:bg-base-200 transition-colors focus:outline-none focus:ring-2 focus:ring-primary/20 focus:ring-offset-2 focus:ring-offset-surface"
-                aria-expanded={logoutOpen}
-                aria-haspopup="true"
-                aria-label="Account menu"
-              >
-                <UserAvatar username={user?.display_name || user?.username} photoUrl={user?.profile_photo} />
-                <span className="text-sm font-medium text-text-primary truncate max-w-[80px] sm:max-w-[100px]" title={user?.display_name || user?.username}>
-                  {(() => {
-                    const full = user?.display_name || user?.username || '';
-                    const first = full.trim().split(/[\s_.-]/)[0] || full;
-                    return first ? first.charAt(0).toUpperCase() + first.slice(1).toLowerCase() : full;
-                  })()}
-                </span>
-                <ChevronDown className={`w-4 h-4 text-text-muted shrink-0 transition-transform ${logoutOpen ? 'rotate-180' : ''}`} aria-hidden />
-              </button>
-            </div>
+            {user ? (
+              <div className="relative" ref={triggerRef}>
+                <button
+                  type="button"
+                  onClick={() => setLogoutOpen(!logoutOpen)}
+                  className="flex items-center gap-2 sm:gap-2.5 px-2 py-1.5 sm:px-3 sm:py-2 rounded-lg border border-border bg-base-100 hover:bg-base-200 transition-colors focus:outline-none focus:ring-2 focus:ring-primary/20 focus:ring-offset-2 focus:ring-offset-surface"
+                  aria-expanded={logoutOpen}
+                  aria-haspopup="true"
+                  aria-label="Account menu"
+                >
+                  <UserAvatar username={user?.display_name || user?.username} photoUrl={user?.profile_photo} />
+                  <span className="text-sm font-medium text-text-primary truncate max-w-[80px] sm:max-w-[100px]" title={user?.display_name || user?.username}>
+                    {(() => {
+                      const full = user?.display_name || user?.username || '';
+                      const first = full.trim().split(/[\s_.-]/)[0] || full;
+                      return first ? first.charAt(0).toUpperCase() + first.slice(1).toLowerCase() : full;
+                    })()}
+                  </span>
+                  <ChevronDown className={`w-4 h-4 text-text-muted shrink-0 transition-transform ${logoutOpen ? 'rotate-180' : ''}`} aria-hidden />
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <Link
+                  to={`/login?next=${encodeURIComponent(window.location.pathname + window.location.search)}`}
+                  className="btn btn-ghost btn-sm rounded-lg hidden sm:inline-flex"
+                >
+                  Sign in
+                </Link>
+                <Link
+                  to={`/register?next=${encodeURIComponent(window.location.pathname + window.location.search)}`}
+                  className="btn btn-primary btn-sm rounded-lg"
+                >
+                  Sign up
+                </Link>
+              </div>
+            )}
           </div>
         </div>
       </header>

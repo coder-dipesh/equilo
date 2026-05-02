@@ -1,0 +1,13 @@
+{% extends "emails/_base.txt" %}
+
+{% block body %}{{ from_user_name }} requested a payment
+
+Hi {{ user_display_name }},
+
+{{ from_user_name }} has asked you to settle up for {{ place.name }}.
+
+Amount owed: ${{ amount|floatformat:2 }}
+
+Settle up in Equilo: {{ deep_link }}
+
+Once you've paid outside the app, mark the settlement so balances stay in sync for everyone.{% endblock %}

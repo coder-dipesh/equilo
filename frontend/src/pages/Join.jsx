@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../AuthContext';
 import { inviteByToken, joinPlace } from '../api';
-import { Users, ShieldCheck } from 'lucide-react';
+import { Users, ShieldCheck, Link2Off, ArrowLeft } from 'lucide-react';
 
 export default function Join() {
   const { token } = useParams();
@@ -56,18 +56,73 @@ export default function Join() {
 
   if (loading) return <div className="pb-8"><p>Loading…</p></div>;
   if (!inviteInfo || !inviteInfo.place_name) {
+    const reason = expiredError || 'This invite link is no longer valid.';
     return (
-      <div className="pb-8 max-w-[360px] mx-auto my-8 text-center">
-        <p className="mb-4">{expiredError || 'Invalid or expired invite link.'}</p>
-        {expiredError && <p className="opacity-80 text-sm mb-4">Ask the place owner to generate a new link from the Invite tab.</p>}
-        <Link to="/" className="link link-primary">Go home</Link>
+      <div className="flex justify-center py-4 sm:py-10">
+        <div className="w-full max-w-[460px]">
+          <div className="rounded-2xl border border-base-300 bg-surface shadow-card p-6 sm:p-8 text-center">
+            <span
+              className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-warning/15 text-warning"
+              aria-hidden
+            >
+              <Link2Off className="h-7 w-7" />
+            </span>
+
+            <h1 className="text-lg sm:text-xl font-semibold text-text-primary m-0">
+              Invite link doesn’t work
+            </h1>
+            <p className="text-sm text-text-secondary mt-2 mb-0">
+              {reason}
+            </p>
+
+            <div className="mt-5 rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-left">
+              <p className="text-sm font-medium text-text-primary m-0">
+                What you can do
+              </p>
+              <ul className="mt-2 space-y-1.5 text-sm text-text-secondary list-disc pl-5 m-0">
+                <li>Ask the place owner to generate a fresh link from the Invite tab.</li>
+                <li>If you already opened this link before, you might already be a member — check your places.</li>
+                {!user && (
+                  <li>
+                    Make sure you’re signed in with the email the invite was sent to.
+                  </li>
+                )}
+              </ul>
+            </div>
+
+            <div className="mt-6 flex flex-col-reverse sm:flex-row gap-2 sm:gap-3 sm:justify-center">
+              <Link
+                to="/"
+                className="btn btn-ghost rounded-lg gap-2 sm:min-w-[140px]"
+              >
+                <ArrowLeft className="h-4 w-4" />
+                Go home
+              </Link>
+              {!user ? (
+                <Link
+                  to="/login"
+                  className="btn btn-primary rounded-lg sm:min-w-[140px]"
+                >
+                  Sign in
+                </Link>
+              ) : (
+                <Link
+                  to="/places"
+                  className="btn btn-primary rounded-lg sm:min-w-[140px]"
+                >
+                  My places
+                </Link>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-[calc(100vh-3.5rem)] pb-28">
-      <div className="max-w-[520px] mx-auto my-8 px-4 sm:px-0">
+    <div className="pb-28">
+      <div className="max-w-[520px] mx-auto py-4 sm:py-8">
         <div className="rounded-2xl border border-base-300 bg-surface shadow-card p-5 sm:p-6">
           <h1 className="text-lg sm:text-xl font-semibold text-text-primary m-0">Confirm join</h1>
           <p className="text-sm text-text-secondary m-0 mt-2">
